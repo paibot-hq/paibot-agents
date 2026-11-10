@@ -124,11 +124,23 @@ pub fn diff(dir: &Path) -> Diff {
     };
     let args = diff_base(dir);
     let text = git(dir, &args).unwrap_or_default();
+    let lines = parse(&text);
+    Diff { status, lines, error: None }
+}
+
+fn parse(text: &str) -> Vec<DiffLine> {
     let mut lines = Vec::new();
     for l in text.lines().take(MAX_LINES) {
         let kind = if l.starts_with("diff --git") {
             Kind::File
-        } else if l.starts_with("+++") || l.starts_with("---") || l.starts_with("index ") || l.starts_with("new file") || l.starts_with("deleted file") || l.starts_with("similarity") || l.starts_with("rename ") {
+        } else if l.starts_with("+++")
+            || l.starts_with("---")
+            || l.starts_with("index ")
+            || l.starts_with("new file")
+            || l.starts_with("deleted file")
+            || l.starts_with("similarity")
+            || l.starts_with("rename ")
+        {
             Kind::Meta
         } else if l.starts_with("@@") {
             Kind::Hunk
@@ -139,12 +151,22 @@ pub fn diff(dir: &Path) -> Diff {
         } else {
             Kind::Plain
         };
-        let text = if kind == Kind::File {
-            l.split(" b/").last().unwrap_or(l).to_string()
-        } else {
-            l.replace('\t', "    ")
-        };
+        let text = if kind == Kind::File { l.split(" b/").last().unwrap_or(l).to_string() } else { l.replace('\t', "    ") };
         lines.push(DiffLine { kind, text });
     }
-    Diff { status, lines, error: None }
+    lines
+}
+
+/// 1ファイル分の差分。まだgitが知らないファイルは全部を追加として出す
+pub fn diff_file(dir: &Path, file: &Path) -> Vec<DiffLine> {
+    let f = file.to_string_lossy().into_owned();
+    let mut args = diff_base(dir);
+    args.extend(["--", &f]);
+    let text = git(dir, &args).unwrap_or_default();
+    if !text.trim().is_empty() {
+        return parse(&text);
+    }
+    // 追跡していないファイル（--no-index は差分があると終了コード1なので直接呼ぶ）
+    let out = Command::new("git").arg("-C").arg(dir).args(["diff", "--no-color", "--no-index", "--", "/dev/null", &f]).output();
+    out.map(|o| parse(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default()
 }

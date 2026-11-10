@@ -1,12 +1,17 @@
 mod app;
 mod config;
+mod files;
 mod git;
 mod keys;
 mod notify;
+mod picker;
+mod projects;
 mod session;
+mod setup;
 mod shot;
 mod term;
 mod theme;
+mod util;
 
 use std::path::PathBuf;
 use std::sync::Arc;

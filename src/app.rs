@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -10,18 +10,22 @@ use eframe::egui::{
     Sense, Stroke, TextEdit, Ui, vec2,
 };
 
-use crate::config::Config;
-use crate::git::{self, Kind};
+use crate::config::{self, Config};
+use crate::files::{self, FileAction, FilePanel};
+use crate::git;
 use crate::notify;
+use crate::picker::{self, Picker};
 use crate::session::{Session, Wake};
+use crate::setup::{self, Setup};
 use crate::term::{self, TermState};
 use crate::theme::*;
+use crate::util::{expand, open_in};
+pub use crate::util::tilde;
 
-struct NewForm {
-    agent: usize,
-    dir: String,
-    branch: String,
-    first: bool,
+#[derive(Clone, Copy, PartialEq)]
+enum Side {
+    Files,
+    Diff,
 }
 
 enum Confirm {
@@ -42,8 +46,10 @@ enum Action {
     Kill(usize),
     Remove(usize),
     Diff(usize),
+    Files(usize),
     Editor(usize),
     Finder(usize),
+    Settings,
 }
 
 pub struct MureApp {
@@ -51,10 +57,15 @@ pub struct MureApp {
     sessions: Vec<Session>,
     sel: usize,
     term: TermState,
-    new_form: Option<NewForm>,
+    picker: Option<Picker>,
+    setup: Option<Setup>,
     rename: Option<(usize, String)>,
     confirm: Option<Confirm>,
+    side: Option<Side>,
     diff: Option<DiffPanel>,
+    files: HashMap<PathBuf, FilePanel>,
+    launch_dir: PathBuf,
+    egui_ctx: egui::Context,
     flash: Option<(String, Instant)>,
     recent: Vec<String>,
     git_dirs: Arc<Mutex<Vec<PathBuf>>>,
@@ -72,17 +83,26 @@ impl MureApp {
         let git_dirs = Arc::new(Mutex::new(Vec::new()));
         let git_info = Arc::new(Mutex::new(HashMap::new()));
         git::spawn_watcher(git_dirs.clone(), git_info.clone(), wake.clone());
+        let mut recent = config::load_recent();
+        if recent.is_empty() {
+            recent.push(tilde(&dir));
+        }
         let mut app = Self {
             term: TermState::new(cfg.font_size),
             cfg,
             sessions: Vec::new(),
             sel: 0,
-            new_form: None,
+            picker: None,
+            setup: None,
             rename: None,
             confirm: None,
+            side: None,
             diff: None,
+            files: HashMap::new(),
+            launch_dir: dir.clone(),
+            egui_ctx: cc.egui_ctx.clone(),
             flash: cfg_err.map(|e| (e, Instant::now())),
-            recent: vec![tilde(&dir)],
+            recent,
             git_dirs,
             git_info,
             wake,
@@ -90,21 +110,34 @@ impl MureApp {
             shot: crate::shot::Shot::from_env(),
             window_focused: true,
         };
-        match app.shot.as_ref().map(|s| s.ui.as_str()) {
-            Some("new") => app.open_new(),
-            Some("diff") if start.is_some() => app.diff = Some(DiffPanel { cwd: dir.clone(), diff: git::diff(&dir) }),
-            _ => {}
+        // 初めて起動したときは設定から
+        let shot_ui = app.shot.as_ref().map(|s| s.ui.clone()).unwrap_or_default();
+        if (!config::exists() && app.shot.is_none()) || shot_ui == "setup" {
+            app.setup = Some(Setup::new(&app.cfg, !config::exists(), &dir, &cc.egui_ctx));
         }
         if let Some(name) = start {
             match app.cfg.agents.iter().position(|a| a.name == name) {
                 Some(agent) => {
-                    let form = NewForm { agent, dir: tilde(&dir), branch: String::new(), first: false };
-                    if let Err(e) = app.create(&form) {
+                    if let Err(e) = app.create(&tilde(&dir), agent, "") {
                         app.flash(format!("{e:#}"));
                     }
                 }
                 None => app.flash(format!("エージェント「{name}」は設定にありません")),
             }
+        }
+        match shot_ui.as_str() {
+            "new" => app.open_new(),
+            "diff" if !app.sessions.is_empty() => app.apply(Action::Diff(0)),
+            "files" if !app.sessions.is_empty() => {
+                app.apply(Action::Files(0));
+                if let Ok(f) = std::env::var("MURE_SHOT_OPEN") {
+                    let cwd = app.sessions[0].cwd.clone();
+                    if let Some(p) = app.files.get_mut(&cwd) {
+                        p.open_path(&cwd.join(f));
+                    }
+                }
+            }
+            _ => {}
         }
         app
     }
@@ -118,24 +151,21 @@ impl MureApp {
     }
 
     fn dialog_open(&self) -> bool {
-        self.new_form.is_some() || self.rename.is_some() || self.confirm.is_some()
+        self.picker.is_some() || self.setup.is_some() || self.rename.is_some() || self.confirm.is_some()
     }
 
     fn select(&mut self, i: usize) {
         if i < self.sessions.len() && i != self.sel {
             self.sel = i;
             self.term.reset();
-            if let Some(d) = &self.diff {
-                if d.cwd != self.sessions[i].cwd {
-                    self.open_diff(i);
-                }
+            if self.side == Some(Side::Diff) {
+                self.open_diff(i);
             }
         }
     }
 
     fn open_new(&mut self) {
-        let dir = self.recent.first().cloned().unwrap_or_else(|| "~".into());
-        self.new_form = Some(NewForm { agent: 0, dir, branch: String::new(), first: true });
+        self.picker = Some(Picker::new(&self.cfg, &self.recent));
     }
 
     fn open_diff(&mut self, i: usize) {
@@ -144,14 +174,14 @@ impl MureApp {
         }
     }
 
-    fn create(&mut self, f: &NewForm) -> Result<()> {
-        let agent = self.cfg.agents[f.agent].clone();
-        let dir = expand(f.dir.trim());
+    fn create(&mut self, dir: &str, agent: usize, branch: &str) -> Result<()> {
+        let Some(agent) = self.cfg.agents.get(agent).cloned() else { bail!("エージェントがありません") };
+        let dir = expand(dir);
         if !dir.is_dir() {
             bail!("フォルダがありません: {}", dir.display());
         }
         let dir = std::fs::canonicalize(&dir)?;
-        let branch = f.branch.trim();
+        let branch = branch.trim();
         let cwd = if branch.is_empty() { dir.clone() } else { git::ensure_worktree(&dir, branch)? };
         let name = if branch.is_empty() {
             cwd.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "/".into())
@@ -162,11 +192,15 @@ impl MureApp {
         let d = tilde(&dir);
         self.recent.retain(|r| *r != d);
         self.recent.insert(0, d);
-        self.recent.truncate(12);
+        self.recent.truncate(8);
+        config::save_recent(&self.recent);
         self.sessions.push(s);
         self.sel = self.sessions.len() - 1;
         self.term.reset();
         self.sync_git_dirs();
+        if self.side == Some(Side::Diff) {
+            self.open_diff(self.sel);
+        }
         Ok(())
     }
 
@@ -186,7 +220,7 @@ impl MureApp {
             self.term.reset();
             self.sync_git_dirs();
             if self.sessions.is_empty() {
-                self.diff = None;
+                self.side = None;
             }
         }
     }
@@ -200,14 +234,31 @@ impl MureApp {
             Action::Remove(i) => self.remove(i),
             Action::Diff(i) => {
                 self.select(i);
-                if self.diff.is_some() { self.diff = None } else { self.open_diff(i) }
+                if self.side == Some(Side::Diff) {
+                    self.side = None;
+                } else {
+                    self.open_diff(i);
+                    self.side = Some(Side::Diff);
+                }
+            }
+            Action::Files(i) => {
+                self.select(i);
+                if self.side == Some(Side::Files) {
+                    self.side = None;
+                } else {
+                    let cwd = self.sessions[i].cwd.clone();
+                    self.files.entry(cwd.clone()).or_insert_with(|| FilePanel::new(cwd));
+                    self.side = Some(Side::Files);
+                }
             }
             Action::Editor(i) => {
                 let cwd = self.sessions[i].cwd.clone();
-                let ok = Command::new("open").arg("-a").arg(&self.cfg.editor_app).arg(&cwd).status().is_ok_and(|s| s.success());
-                if !ok {
+                if !open_in(&self.cfg.editor_app, &cwd) {
                     self.flash(format!("{} で開けませんでした", self.cfg.editor_app));
                 }
+            }
+            Action::Settings => {
+                self.setup = Some(Setup::new(&self.cfg, false, &self.launch_dir, &self.egui_ctx));
             }
             Action::Finder(i) => {
                 let _ = Command::new("open").arg(&self.sessions[i].cwd).status();
@@ -264,6 +315,12 @@ impl MureApp {
         if take(Key::D) && !self.sessions.is_empty() {
             self.apply(Action::Diff(self.sel));
         }
+        if take(Key::E) && !self.sessions.is_empty() {
+            self.apply(Action::Files(self.sel));
+        }
+        if take(Key::Comma) {
+            self.apply(Action::Settings);
+        }
         if take(Key::W) && !self.sessions.is_empty() {
             let i = self.sel;
             self.apply(if self.sessions[i].exit.is_some() { Action::Remove(i) } else { Action::Kill(i) });
@@ -311,6 +368,12 @@ impl MureApp {
             });
         });
         ui.add_space(10.0);
+
+        egui::TopBottomPanel::bottom("sidebar-foot").frame(Frame::new().inner_margin(Margin { top: 8, ..Default::default() })).show_separator_line(false).show_inside(ui, |ui| {
+            if ui.add(egui::Button::new(RichText::new("設定").size(12.0).color(MUTED)).frame(false)).on_hover_text("⌘,").clicked() {
+                acts.push(Action::Settings);
+            }
+        });
 
         if self.sessions.is_empty() {
             ui.label(RichText::new("セッションはまだありません").color(MUTED));
@@ -386,6 +449,10 @@ impl MureApp {
                         acts.push(Action::Rename(i));
                         ui.close();
                     }
+                    if ui.button("ファイルを見る").clicked() {
+                        acts.push(Action::Files(i));
+                        ui.close();
+                    }
                     if ui.button("差分を見る").clicked() {
                         acts.push(Action::Diff(i));
                         ui.close();
@@ -430,9 +497,11 @@ impl MureApp {
                 if ui.button("エディタ").on_hover_text(format!("{} で開く", self.cfg.editor_app)).clicked() {
                     acts.push(Action::Editor(i));
                 }
-                let on = self.diff.is_some();
-                if ui.selectable_label(on, "差分").on_hover_text("⌘D").clicked() {
+                if ui.selectable_label(self.side == Some(Side::Diff), "差分").on_hover_text("⌘D").clicked() {
                     acts.push(Action::Diff(i));
+                }
+                if ui.selectable_label(self.side == Some(Side::Files), "ファイル").on_hover_text("⌘E").clicked() {
+                    acts.push(Action::Files(i));
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     status_chip(ui, s);
@@ -484,32 +553,10 @@ impl MureApp {
             }
             ui.add_space(6.0);
             ui.separator();
-            let font = FontId::monospace(12.0);
-            let row_h = ui.fonts(|f| f.row_height(&font)) + 2.0;
-            let lines = &d.diff.lines;
-            ScrollArea::both().auto_shrink([false, false]).show_rows(ui, row_h, lines.len(), |ui, range| {
-                for l in &lines[range] {
-                    let (fg, bg) = match l.kind {
-                        Kind::File => (TEXT, CARD_SEL),
-                        Kind::Meta => (FAINT, Color32::TRANSPARENT),
-                        Kind::Hunk => (ACCENT, Color32::TRANSPARENT),
-                        Kind::Add => (OK, Color32::from_rgba_unmultiplied(0x8f, 0xd1, 0x7f, 18)),
-                        Kind::Del => (BAD, Color32::from_rgba_unmultiplied(0xf0, 0x74, 0x7c, 18)),
-                        Kind::Plain => (TERM_FG.gamma_multiply(0.85), Color32::TRANSPARENT),
-                    };
-                    let mut text = RichText::new(&l.text).font(font.clone()).color(fg);
-                    if l.kind == Kind::File {
-                        text = text.strong();
-                    }
-                    Frame::new().fill(bg).show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        ui.add(Label::new(text).extend());
-                    });
-                }
-            });
+            files::diff_view(ui, &d.diff.lines, "diff-all");
         }
         if close {
-            self.diff = None;
+            self.side = None;
         } else if reload {
             let cwd = d.cwd.clone();
             d.diff = git::diff(&cwd);
@@ -517,75 +564,34 @@ impl MureApp {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
-        if let Some(mut f) = self.new_form.take() {
-            let mut keep = true;
-            let mut submit = false;
-            let modal = egui::Modal::new(Id::new("new-session")).show(ctx, |ui| {
-                ui.set_width(520.0);
-                ui.label(RichText::new("新しいセッション").size(17.0).strong().color(TEXT));
-                ui.add_space(12.0);
-                ui.label(RichText::new("エージェント").size(12.0).color(MUTED));
-                ui.horizontal(|ui| {
-                    for (i, a) in self.cfg.agents.iter().enumerate() {
-                        if ui.selectable_label(f.agent == i, RichText::new(&a.name).size(14.0)).clicked() {
-                            f.agent = i;
-                        }
+        if let Some(mut p) = self.picker.take() {
+            match p.show(ctx, &self.cfg) {
+                picker::Outcome::Keep => self.picker = Some(p),
+                picker::Outcome::Cancel => {}
+                picker::Outcome::Start { dir, agent, branch } => {
+                    if let Err(e) = self.create(&dir, agent, &branch) {
+                        self.flash(format!("{e:#}"));
+                        self.picker = Some(p);
                     }
-                });
-                ui.add_space(10.0);
-                ui.label(RichText::new("フォルダ").size(12.0).color(MUTED));
-                ui.horizontal(|ui| {
-                    let r = ui.add(TextEdit::singleline(&mut f.dir).desired_width(340.0).font(FontId::monospace(13.0)));
-                    if f.first {
-                        r.request_focus();
-                        f.first = false;
-                    }
-                    if ui.button("選ぶ…").clicked() {
-                        if let Some(p) = rfd::FileDialog::new().set_directory(expand(&f.dir)).pick_folder() {
-                            f.dir = tilde(&p);
-                        }
-                    }
-                    egui::ComboBox::from_id_salt("recent").selected_text("最近").width(70.0).show_ui(ui, |ui| {
-                        for r in &self.recent {
-                            if ui.selectable_label(false, r).clicked() {
-                                f.dir = r.clone();
-                            }
-                        }
-                    });
-                });
-                ui.add_space(10.0);
-                ui.label(RichText::new("ブランチ（任意）").size(12.0).color(MUTED));
-                ui.add(
-                    TextEdit::singleline(&mut f.branch)
-                        .desired_width(340.0)
-                        .font(FontId::monospace(13.0))
-                        .hint_text("入れると、そのブランチの worktree を作って起動"),
-                );
-                ui.add_space(16.0);
-                ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new(RichText::new("作る").strong()).fill(ACCENT.gamma_multiply(0.35))).clicked() {
-                        submit = true;
-                    }
-                    if ui.button("やめる").clicked() {
-                        keep = false;
-                    }
-                    ui.label(RichText::new("Enter で作る・Esc でやめる").size(11.0).color(FAINT));
-                });
-            });
-            if ctx.input(|i| i.key_pressed(Key::Enter)) {
-                submit = true;
-            }
-            if modal.should_close() {
-                keep = false;
-            }
-            if submit {
-                match self.create(&f) {
-                    Ok(()) => keep = false,
-                    Err(e) => self.flash(format!("{e:#}")),
                 }
             }
-            if keep {
-                self.new_form = Some(f);
+        }
+
+        if let Some(mut st) = self.setup.take() {
+            match st.show(ctx) {
+                setup::Outcome::Keep => self.setup = Some(st),
+                setup::Outcome::Cancel => {}
+                setup::Outcome::Save(c) => match config::save(&c) {
+                    Ok(()) => {
+                        self.term.font_size = c.font_size;
+                        self.cfg = c;
+                        self.flash("設定を保存しました");
+                    }
+                    Err(e) => {
+                        self.flash(format!("設定を保存できませんでした: {e:#}"));
+                        self.setup = Some(st);
+                    }
+                },
             }
         }
 
@@ -686,13 +692,41 @@ impl eframe::App for MureApp {
             .frame(Frame::new().fill(SIDEBAR_BG).inner_margin(Margin::same(12)))
             .show(ctx, |ui| acts.extend(self.sidebar(ui)));
 
-        if self.diff.is_some() {
-            egui::SidePanel::right("diff")
+        if let Some(side) = self.side.filter(|_| !self.sessions.is_empty()) {
+            egui::SidePanel::right("side")
                 .resizable(true)
-                .default_width(560.0)
+                .default_width(600.0)
                 .width_range(280.0..=1400.0)
                 .frame(Frame::new().fill(SIDEBAR_BG).inner_margin(Margin::same(12)))
-                .show(ctx, |ui| self.diff_panel(ui));
+                .show(ctx, |ui| match side {
+                    Side::Diff => self.diff_panel(ui),
+                    Side::Files => {
+                        let cwd = self.sessions[self.sel].cwd.clone();
+                        let mut close = false;
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("ファイル").size(15.0).strong().color(TEXT));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.button("閉じる").on_hover_text("⌘E").clicked() {
+                                    close = true;
+                                }
+                            });
+                        });
+                        ui.add_space(6.0);
+                        let panel = self.files.entry(cwd.clone()).or_insert_with(|| FilePanel::new(cwd));
+                        for a in panel.show(ui) {
+                            match a {
+                                FileAction::OpenInEditor(p) => {
+                                    if !open_in(&self.cfg.editor_app, &p) {
+                                        self.flash = Some((format!("{} で開けませんでした", self.cfg.editor_app), Instant::now()));
+                                    }
+                                }
+                            }
+                        }
+                        if close {
+                            self.side = None;
+                        }
+                    }
+                });
         }
 
         egui::CentralPanel::default().frame(Frame::new().fill(TERM_BG)).show(ctx, |ui| {
@@ -771,24 +805,4 @@ fn elapsed(secs: u64) -> String {
         60..3600 => format!("{}分", secs / 60),
         _ => format!("{}時間{}分", secs / 3600, secs / 60 % 60),
     }
-}
-
-fn expand(s: &str) -> PathBuf {
-    if let Some(rest) = s.strip_prefix('~') {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest.trim_start_matches('/'));
-        }
-    }
-    PathBuf::from(s)
-}
-
-pub fn tilde(p: &Path) -> String {
-    let s = p.to_string_lossy().into_owned();
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = home.to_string_lossy().into_owned();
-        if !home.is_empty() && s.starts_with(&home) {
-            return format!("~{}", &s[home.len()..]);
-        }
-    }
-    s
 }
