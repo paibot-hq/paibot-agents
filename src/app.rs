@@ -35,6 +35,8 @@ enum Side {
     Search,
     /// ほかのエージェントに呼ばれた codex の中身
     Child,
+    /// 誰が誰を呼んだかを時間の流れで見る
+    Map,
 }
 
 /// 右のパネルで見ている「呼ばれた codex」
@@ -199,6 +201,7 @@ pub struct PaispaceApp {
     children: Arc<Mutex<Vec<children::Child>>>,
     children_watch: Arc<Mutex<children::Watch>>,
     child_view: Option<ChildView>,
+    map_window: crate::map::Window,
     wake: Wake,
     allow_close: bool,
     shot: Option<crate::shot::Shot>,
@@ -253,6 +256,7 @@ impl PaispaceApp {
             children: kids,
             children_watch: kids_watch,
             child_view: None,
+            map_window: crate::map::Window::All,
             wake,
             allow_close: false,
             shot: crate::shot::Shot::from_env(),
@@ -291,7 +295,17 @@ impl PaispaceApp {
                 }
             }
         }
+        if let (Ok(list), true) = (std::env::var("PAISPACE_SHOT_AGENTS"), app.shot.is_some()) {
+            for name in list.split(',') {
+                if let Some(agent) = app.cfg.agents.iter().position(|a| a.name == name.trim()) {
+                    if let Err(e) = app.create(&tilde(&dir), agent, "", Vec::new(), None) {
+                        app.flash(format!("{e:#}"));
+                    }
+                }
+            }
+        }
         match shot_ui.as_str() {
+            "map" => app.side = Some(Side::Map),
             "resume" => app.apply(Action::ResumeAll),
             "new" => {
                 app.open_new();
@@ -745,6 +759,9 @@ impl PaispaceApp {
         if take(Key::E) && !self.sessions.is_empty() {
             self.apply(Action::Files(self.sel));
         }
+        if take(Key::G) && !self.sessions.is_empty() {
+            self.side = if self.side == Some(Side::Map) { None } else { Some(Side::Map) };
+        }
         if take(Key::Comma) {
             self.apply(Action::Settings);
         }
@@ -1060,6 +1077,9 @@ impl PaispaceApp {
         ui.add_space(4.0);
         ui.painter().vline(ui.cursor().right() - 2.0, bar.y_range().shrink(11.0), Stroke::new(1.0, BORDER));
         ui.add_space(6.0);
+        if ui::icon_button(ui, ui::icon::TREE_STRUCTURE, "エージェントマップ  ⌘G", matches!(self.side, Some(Side::Map) | Some(Side::Child))).clicked() {
+            self.side = if self.side == Some(Side::Map) { None } else { Some(Side::Map) };
+        }
         if ui::icon_button(ui, ui::icon::GIT_DIFF, "差分  ⌘D", self.side == Some(Side::Diff)).clicked() {
             acts.push(Action::Diff(i));
         }
@@ -1108,6 +1128,60 @@ impl PaispaceApp {
         (acts, tab_act)
     }
 
+    /// マップに並べるもの
+    fn map_lanes(&self) -> Vec<crate::map::Lane> {
+        use crate::map::{self, Kid, Lane, State};
+        let kids = self.children_by_session();
+        self.sessions
+            .iter()
+            .zip(kids)
+            .map(|(s, ks)| {
+                let state = match s.exit {
+                    Some(0) => State::Done,
+                    Some(_) => State::Stopped,
+                    None if s.attention => State::Waiting,
+                    None if s.busy => State::Running,
+                    None => State::Quiet,
+                };
+                let color = match resume::kind(&s.base_cmd) {
+                    resume::Kind::Claude => map::CLAUDE,
+                    resume::Kind::Codex => map::CODEX,
+                    resume::Kind::Other => map::OTHER,
+                };
+                let start = s.started_at;
+                Lane {
+                    name: s.name.clone(),
+                    agent: s.agent.clone(),
+                    color,
+                    start,
+                    state,
+                    kids: ks
+                        .into_iter()
+                        .map(|c| Kid {
+                            state: match c.status {
+                                children::Status::Running => State::Running,
+                                children::Status::Done => State::Done,
+                                children::Status::Stopped => State::Stopped,
+                            },
+                            end: (c.status != children::Status::Running).then_some(c.updated),
+                            color: match c.kind {
+                                children::Kind::Codex => map::CODEX,
+                                children::Kind::Claude => map::CLAUDE,
+                                children::Kind::ClaudeSub => map::SUB,
+                            },
+                            id: c.id,
+                            label: c.label,
+                            prompt: c.prompt,
+                            last: c.last,
+                            start: c.started,
+                            tools: c.tools,
+                        })
+                        .collect(),
+                }
+            })
+            .collect()
+    }
+
     fn child_panel(&mut self, ui: &mut Ui) {
         let Some(v) = &mut self.child_view else {
             self.side = None;
@@ -1120,6 +1194,7 @@ impl PaispaceApp {
         }
         let running = !v.done && v.mtime.is_some_and(|m| m.elapsed().unwrap_or_default() < std::time::Duration::from_secs(90));
         let mut close = false;
+        let mut to_map = false;
         ui.horizontal(|ui| {
             ui.label(RichText::new(ui::icon::ROBOT).size(15.0).color(ACCENT));
             ui.label(RichText::new(&v.label).font(ui::bold(13.5)).color(TEXT));
@@ -1134,6 +1209,9 @@ impl PaispaceApp {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui::icon_button(ui, ui::icon::X, "閉じる", false).clicked() {
                     close = true;
+                }
+                if ui::icon_button(ui, ui::icon::TREE_STRUCTURE, "エージェントマップへ", false).clicked() {
+                    to_map = true;
                 }
                 if ui::icon_button(ui, ui::icon::FILE_TEXT, "記録のファイルを開く", false).clicked() {
                     let _ = std::process::Command::new("open").arg("-R").arg(&v.file).status();
@@ -1192,6 +1270,8 @@ impl PaispaceApp {
         });
         if close {
             self.side = None;
+        } else if to_map {
+            self.side = Some(Side::Map);
         }
     }
 
@@ -1497,6 +1577,12 @@ impl eframe::App for PaispaceApp {
                 .show(ctx, |ui| match side {
                     Side::Diff => self.diff_panel(ui),
                     Side::Child => self.child_panel(ui),
+                    Side::Map => {
+                        let lanes = self.map_lanes();
+                        if let Some(id) = crate::map::show(ui, &lanes, &mut self.map_window) {
+                            acts.push(Action::Child(id));
+                        }
+                    }
                     Side::Files | Side::Search => {
                         let cwd = self.sessions[self.sel].cwd.clone();
                         let mut close = false;

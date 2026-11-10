@@ -5,6 +5,7 @@ mod editor;
 mod files;
 mod git;
 mod keys;
+mod map;
 mod notify;
 mod picker;
 mod projects;

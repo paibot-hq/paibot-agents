@@ -18,6 +18,7 @@
   - コマンドで呼ばれた codex（`codex exec`）: `~/.codex/sessions` の source=exec の記録
   - コマンドで呼ばれた claude（`claude -p`）: `~/.claude/projects/<フォルダ>/` の entrypoint=sdk-cli の記録
   - claude の子エージェント: `~/.claude/projects/<フォルダ>/<会話ID>/subagents/`（paispace が会話 ID を決めているので、どのセッションの子かが確実に分かる）
+- エージェントマップ（⌘G）: 全部のセッションと、そこから呼ばれたエージェントを時間の流れに並べる。親から子へ線でつなぎ、動いている間は帯と線の上を光が流れる。色は claude・codex・子エージェントで分ける。クリックで中身を開く
 - 初めて起動したときに設定画面（あとから ⌘,）。プロジェクトの置き場、入っているエージェント（自動で探す）、エディタを選ぶ
 - お節介はしない: フックを入れない、エージェントの設定に触らない、worktree を勝手に消さない
 
@@ -46,6 +47,7 @@ Dock から開きたいときは `sh scripts/bundle.sh ~/Applications` で `Pais
 | ⌘J | ファイルを開いている間、エージェントを下に出す／隠す |
 | ⌘⌥← → | タブを移る |
 | ⌘E | ファイルパネル |
+| ⌘G | エージェントマップ |
 | ⌘D | 差分パネル |
 | ⌘, | 設定 |
 | ⌘W | ファイルのタブを閉じる（エージェントのタブなら止める） |
@@ -89,4 +91,4 @@ cmd = ""                      # 空ならログインシェル
 
 ## 確認用
 
-`PAISPACE_SHOT=out.png PAISPACE_SHOT_SECS=4 paispace -a shell` で、4秒後に自分の画面を PNG に書き出して終わる（`PAISPACE_SHOT_UI=new|diff|files|setup|ask|quick|search|resume|child` でその画面を開いた状態に、`PAISPACE_SHOT_OPEN=src/main.rs` でファイルを開いた状態に）。`PAISPACE_CONFIG_DIR` で設定の置き場を変えられる。
+`PAISPACE_SHOT=out.png PAISPACE_SHOT_SECS=4 paispace -a shell` で、4秒後に自分の画面を PNG に書き出して終わる（`PAISPACE_SHOT_UI=new|diff|files|setup|ask|quick|search|resume|child|map` でその画面を開いた状態に、`PAISPACE_SHOT_OPEN=src/main.rs` でファイルを開いた状態に）。`PAISPACE_CONFIG_DIR` で設定の置き場を変えられる。
