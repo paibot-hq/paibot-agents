@@ -32,6 +32,11 @@ pub struct Session {
     pub attention: bool,
     /// 終了していれば Some(終了コード)
     pub exit: Option<u32>,
+    /// 再開用の会話の ID（claude は始めるときに決める、codex はあとで探す）
+    pub resume_id: Option<String>,
+    /// --session-id などを付ける前のコマンド
+    pub base_cmd: String,
+    pub started_at: std::time::SystemTime,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
@@ -122,6 +127,9 @@ impl Session {
             busy: false,
             attention: false,
             exit: None,
+            resume_id: None,
+            base_cmd: agent.cmd.clone(),
+            started_at: std::time::SystemTime::now(),
             writer,
             master: pair.master,
             child,

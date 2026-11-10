@@ -13,6 +13,7 @@
 - 差分パネル（⌘D）、エディタ／Finder で開く
 - 新しいセッション（⌘N）: プロジェクトの一覧から選んで Enter ですぐ始まる。文字を打つと絞り込み、Tab でエージェントを切り替え
 - VSCode を読む（書き込みはしない）: `.code-workspace` のフォルダと、VSCode・Cursor・Windsurf で最近開いたフォルダ／ワークスペースを新規作成の一覧に並べる。`mure work.code-workspace` で直接開ける。複数フォルダのワークスペースは共通の親を「（全体）」として選べる
+- セッションを覚える: 閉じて開き直すと、サイドバーの「前回のセッション」から再開できる（開いていたファイルのタブも戻る）。claude は `--session-id` で決めた会話を `--resume` で、codex は `~/.codex/sessions` から見つけた会話を `codex resume` で、続きから戻る。そのほかは同じフォルダで開き直す。覚えているのは `~/.config/mure/sessions.json`
 - 初めて起動したときに設定画面（あとから ⌘,）。プロジェクトの置き場、入っているエージェント（自動で探す）、エディタを選ぶ
 - お節介はしない: フックを入れない、エージェントの設定に触らない、worktree を勝手に消さない
 
@@ -83,4 +84,4 @@ cmd = ""                      # 空ならログインシェル
 
 ## 確認用
 
-`MURE_SHOT=out.png MURE_SHOT_SECS=4 mure -a shell` で、4秒後に自分の画面を PNG に書き出して終わる（`MURE_SHOT_UI=new|diff|files|setup|ask|quick|search` でその画面を開いた状態に、`MURE_SHOT_OPEN=src/main.rs` でファイルを開いた状態に）。`MURE_CONFIG_DIR` で設定の置き場を変えられる。
+`MURE_SHOT=out.png MURE_SHOT_SECS=4 mure -a shell` で、4秒後に自分の画面を PNG に書き出して終わる（`MURE_SHOT_UI=new|diff|files|setup|ask|quick|search|resume` でその画面を開いた状態に、`MURE_SHOT_OPEN=src/main.rs` でファイルを開いた状態に）。`MURE_CONFIG_DIR` で設定の置き場を変えられる。

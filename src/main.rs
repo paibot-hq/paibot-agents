@@ -8,6 +8,7 @@ mod notify;
 mod picker;
 mod projects;
 mod quickopen;
+mod resume;
 mod search;
 mod session;
 mod setup;

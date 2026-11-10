@@ -10,7 +10,8 @@ use eframe::egui::{
     Sense, Stroke, TextEdit, Ui, vec2,
 };
 
-use crate::config::{self, Config};
+use crate::config::{self, Agent, Config};
+use crate::resume::{self, Saved};
 use crate::editor::{self, Doc, DocAction};
 use crate::quickopen::{self, QuickOpen};
 use crate::search::Search;
@@ -127,6 +128,9 @@ enum Action {
     Editor(usize),
     Finder(usize),
     Settings,
+    Resume(usize),
+    ResumeAll,
+    Forget(usize),
 }
 
 pub struct MureApp {
@@ -146,6 +150,9 @@ pub struct MureApp {
     /// ファイルを開いているとき、エージェントを下に出す
     dock: bool,
     grab_term: bool,
+    /// 前回のセッション（まだ再開していないもの）
+    dormant: Vec<Saved>,
+    persisted: Instant,
     launch_dir: PathBuf,
     egui_ctx: egui::Context,
     flash: Option<(String, Instant)>,
@@ -192,6 +199,8 @@ impl MureApp {
             ask: None,
             dock: true,
             grab_term: false,
+            dormant: resume::load(),
+            persisted: Instant::now(),
             launch_dir: dir.clone(),
             egui_ctx: cc.egui_ctx.clone(),
             flash: cfg_err.map(|e| (e, Instant::now())),
@@ -222,6 +231,7 @@ impl MureApp {
             app.open_new();
         }
         match shot_ui.as_str() {
+            "resume" => app.apply(Action::ResumeAll),
             "new" => app.open_new(),
             "diff" if !app.sessions.is_empty() => app.apply(Action::Diff(0)),
             "files" | "ask" | "quick" | "search" if !app.sessions.is_empty() => {
@@ -336,12 +346,25 @@ impl MureApp {
         } else {
             branch.to_string()
         };
-        let s = Session::spawn(name, &agent, cwd, self.term.size, self.cfg.scrollback, self.wake.clone())?;
         let d = tilde(&dir);
         self.recent.retain(|r| *r != d);
         self.recent.insert(0, d);
         self.recent.truncate(8);
         config::save_recent(&self.recent);
+        self.spawn(name, &agent, cwd, None)
+    }
+
+    /// エージェントを起動して一覧に加える。saved があればその続きから
+    fn spawn(&mut self, name: String, agent: &Agent, cwd: PathBuf, saved: Option<&Saved>) -> Result<()> {
+        let base = agent.cmd.clone();
+        let resumed = saved
+            .filter(|s| s.resumable())
+            .and_then(|s| s.resume_id.as_deref().and_then(|id| resume::resume_cmd(&base, id).map(|c| (c, Some(id.to_string())))));
+        let (cmd, id) = resumed.unwrap_or_else(|| resume::start_cmd(&base));
+        let run = Agent { name: agent.name.clone(), cmd };
+        let mut s = Session::spawn(name, &run, cwd.clone(), self.term.size, self.cfg.scrollback, self.wake.clone())?;
+        s.base_cmd = base;
+        s.resume_id = id;
         self.sessions.push(s);
         self.sel = self.sessions.len() - 1;
         self.term.reset();
@@ -349,7 +372,66 @@ impl MureApp {
         if self.side == Some(Side::Diff) {
             self.open_diff(self.sel);
         }
+        if let Some(saved) = saved.filter(|s| !s.tabs.is_empty()) {
+            let w = self.ws.entry(cwd.clone()).or_insert_with(|| Workspace::new(cwd));
+            for t in &saved.tabs {
+                if t.is_file() && !w.docs.iter().any(|d| d.path == *t) {
+                    w.docs.push(Doc::open(t.clone()));
+                }
+            }
+        }
+        self.persist();
         Ok(())
+    }
+
+    fn resume_dormant(&mut self, i: usize) {
+        if i >= self.dormant.len() {
+            return;
+        }
+        let saved = self.dormant.remove(i);
+        let agent = self
+            .cfg
+            .agents
+            .iter()
+            .find(|a| a.name == saved.agent)
+            .cloned()
+            .unwrap_or_else(|| Agent { name: saved.agent.clone(), cmd: saved.cmd.clone() });
+        if let Err(e) = self.spawn(saved.name.clone(), &agent, saved.cwd.clone(), Some(&saved)) {
+            self.flash(format!("{} を再開できませんでした: {e:#}", saved.name));
+            self.dormant.insert(i, saved);
+        }
+    }
+
+    /// 今のセッションを覚える（次に開いたとき「前回のセッション」として出す）
+    fn persist(&mut self) {
+        self.persisted = Instant::now();
+        // codex は始めたあとに会話の ID を探す
+        let mut taken: Vec<String> = self.sessions.iter().filter_map(|s| s.resume_id.clone()).collect();
+        for s in self.sessions.iter_mut() {
+            if s.exit.is_none() && s.resume_id.is_none() && resume::kind(&s.base_cmd) == resume::Kind::Codex {
+                if let Some(id) = resume::find_codex_id(&s.cwd, s.started_at, &taken) {
+                    taken.push(id.clone());
+                    s.resume_id = Some(id);
+                }
+            }
+        }
+        let mut list: Vec<Saved> = self
+            .sessions
+            .iter()
+            .filter(|s| s.exit.is_none())
+            .map(|s| Saved {
+                name: s.name.clone(),
+                agent: s.agent.clone(),
+                cmd: s.base_cmd.clone(),
+                cwd: s.cwd.clone(),
+                resume_id: s.resume_id.clone(),
+                tabs: self.ws.get(&s.cwd).map(|w| w.docs.iter().map(|d| d.path.clone()).collect()).unwrap_or_default(),
+            })
+            .collect();
+        list.extend(self.dormant.iter().cloned());
+        if self.shot.is_none() || std::env::var_os("MURE_CONFIG_DIR").is_some() {
+            resume::save(&list);
+        }
     }
 
     fn sync_git_dirs(&self) {
@@ -370,6 +452,7 @@ impl MureApp {
             if self.sessions.is_empty() {
                 self.side = None;
             }
+            self.persist();
         }
     }
 
@@ -418,6 +501,22 @@ impl MureApp {
                     self.flash(format!("{} で開けませんでした", self.cfg.editor_app));
                 }
             }
+            Action::Resume(i) => self.resume_dormant(i),
+            Action::ResumeAll => {
+                while !self.dormant.is_empty() {
+                    let before = self.dormant.len();
+                    self.resume_dormant(0);
+                    if self.dormant.len() == before {
+                        break;
+                    }
+                }
+            }
+            Action::Forget(i) => {
+                if i < self.dormant.len() {
+                    self.dormant.remove(i);
+                    self.persist();
+                }
+            }
             Action::Settings => {
                 self.setup = Some(Setup::new(&self.cfg, false, &self.launch_dir, &self.egui_ctx));
             }
@@ -458,6 +557,9 @@ impl MureApp {
                 }
             }
             s.busy = busy;
+        }
+        if self.persisted.elapsed() > Duration::from_secs(10) {
+            self.persist();
         }
         if self.flash.as_ref().is_some_and(|(_, t)| t.elapsed() > Duration::from_secs(6)) {
             self.flash = None;
@@ -580,6 +682,54 @@ impl MureApp {
                 acts.push(Action::Settings);
             }
         });
+
+        if !self.dormant.is_empty() {
+            egui::TopBottomPanel::bottom("dormant")
+                .frame(Frame::new().inner_margin(Margin { top: 8, ..Default::default() }))
+                .show_separator_line(true)
+                .show_inside(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("前回のセッション").size(12.0).strong().color(MUTED));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.small_button("全部再開").clicked() {
+                                acts.push(Action::ResumeAll);
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+                    ScrollArea::vertical().id_salt("dormant-list").max_height(260.0).show(ui, |ui| {
+                        for (i, d) in self.dormant.iter().enumerate() {
+                            let id = Id::new(("dormant", i));
+                            let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
+                            let inner = Frame::new()
+                                .fill(if hovered { CARD_HOVER } else { Color32::TRANSPARENT })
+                                .stroke(Stroke::new(1.0, BORDER))
+                                .corner_radius(8)
+                                .inner_margin(Margin::symmetric(10, 6))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new("◇").color(FAINT));
+                                        ui.add(Label::new(RichText::new(&d.name).size(13.0).color(TEXT)).truncate());
+                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                            if ui.add(egui::Button::new(RichText::new("×").color(FAINT)).frame(false)).on_hover_text("忘れる").clicked() {
+                                                acts.push(Action::Forget(i));
+                                            }
+                                        });
+                                    });
+                                    let how = if d.resumable() { "続きから" } else { "開き直す" };
+                                    let tabs = if d.tabs.is_empty() { String::new() } else { format!(" · ファイル {}", d.tabs.len()) };
+                                    ui.add(Label::new(RichText::new(format!("{} · {how}{tabs}", d.agent)).size(11.0).color(FAINT)).truncate());
+                                });
+                            let r = ui.interact(inner.response.rect, id, Sense::click()).on_hover_text(format!("{}\nクリックで再開", tilde(&d.cwd)));
+                            if r.clicked() {
+                                acts.push(Action::Resume(i));
+                            }
+                            ui.add_space(4.0);
+                        }
+                    });
+                });
+        }
 
         if self.sessions.is_empty() {
             ui.label(RichText::new("セッションはまだありません").color(MUTED));
@@ -919,7 +1069,7 @@ impl MureApp {
                 Confirm::Quit => {
                     let dirty = self.dirty_docs();
                     let extra = if dirty > 0 { format!("保存していないファイルが {dirty} 個あります（保存されません）。") } else { String::new() };
-                    ("終わる".to_string(), format!("動いているセッションが {} 個あります。{extra}全部止めて終わりますか？", self.alive()))
+                    ("終わる".to_string(), format!("動いているセッションが {} 個あります。{extra}全部止めて終わりますか？\n\n次に開いたとき、サイドバーの「前回のセッション」から再開できます（claude と codex は会話の続きから）。", self.alive()))
                 }
                 Confirm::CloseDoc(cwd, i) => (
                     "閉じる".to_string(),
@@ -981,6 +1131,9 @@ impl eframe::App for MureApp {
             }
         }
 
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.persist();
+        }
         if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && (self.alive() > 0 || self.dirty_docs() > 0) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.confirm = Some(Confirm::Quit);
@@ -1052,6 +1205,13 @@ impl eframe::App for MureApp {
                     }
                     ui.add_space(8.0);
                     ui.label(RichText::new("⌘N").size(12.0).color(FAINT));
+                    if !self.dormant.is_empty() {
+                        ui.add_space(18.0);
+                        let n = self.dormant.len();
+                        if ui.add(egui::Button::new(RichText::new(format!("前回の {n} セッションを再開")).size(14.0)).min_size(vec2(220.0, 34.0)).corner_radius(8.0)).clicked() {
+                            acts.push(Action::ResumeAll);
+                        }
+                    }
                 });
                 return;
             }
