@@ -301,9 +301,11 @@ impl PaispaceApp {
             }
         }
         if let (Ok(list), true) = (std::env::var("PAISPACE_SHOT_AGENTS"), app.shot.is_some()) {
-            for name in list.split(',') {
+            for item in list.split(',') {
+                // 「エージェント@フォルダ」でフォルダも選べる
+                let (name, at) = item.split_once('@').map(|(a, b)| (a, b.to_string())).unwrap_or((item, tilde(&dir)));
                 if let Some(agent) = app.cfg.agents.iter().position(|a| a.name == name.trim()) {
-                    if let Err(e) = app.create(&tilde(&dir), agent, "", Vec::new(), None) {
+                    if let Err(e) = app.create(&at, agent, "", Vec::new(), None) {
                         app.flash(format!("{e:#}"));
                     }
                 }
@@ -311,6 +313,10 @@ impl PaispaceApp {
         }
         match shot_ui.as_str() {
             "map" => app.side = Some(Side::Map),
+            "timeline" => {
+                app.side = Some(Side::Map);
+                app.map_view = crate::map::View::Timeline;
+            }
             "resume" => app.apply(Action::ResumeAll),
             "new" => {
                 app.open_new();

@@ -1,83 +1,130 @@
+<div align="center">
+
 # paispace
 
-コーディングエージェント（claude / codex / シェル）を並べて動かす macOS のデスクトップアプリ。Rust 製（egui）。
+**Run coding agents side by side — and see which agent called which.**
 
-- 左にセッションのカード。動いている／待っている／終了、ブランチ、最近の出力1行、変更量（+12 −3 · 4ファイル）
-- 右にそのセッションのターミナル。日本語入力、コピー（ドラッグして ⌘C）、貼り付け、ホイールで履歴
-- 手が空いたら macOS の通知
-- ブランチ名を入れると git worktree を作ってそこで起動
-- エディタ: 真ん中はタブ（「エージェント」＋開いたファイル）。色付き・行番号付きで編集して ⌘S で保存。ファイルを開いている間はエージェントを下に出しておける（⌘J）。エージェントが書き換えたら自動で読み直し、こちらに未保存の変更があるときは上書きせずに知らせる
-- エージェントに聞く（⌘L）: 選んだ行（または差分のまとまりの「聞く」）について一言書くと「src/x.rs の 12〜20 行目: …」としてエージェントの入力欄に入る。⌘Enter ならそのまま送る
-- ファイルパネル（⌘E）: フォルダのツリー（変更のあるファイルに色）。クリックでタブに開く
-- ファイルを名前から開く（⌘P）、全体を検索（⌘⇧F、rg があれば rg）
-- 差分パネル（⌘D）、エディタ／Finder で開く
-- 新しいセッション（⌘N）: プロジェクトの一覧から選んで Enter ですぐ始まる。文字を打つと絞り込み、Tab でエージェントを切り替え
-- VSCode を読む（書き込みはしない）: `.code-workspace` のフォルダと、VSCode・Cursor・Windsurf で最近開いたフォルダ／ワークスペースを新規作成の一覧に並べる。`paispace work.code-workspace` で直接開ける。新規作成の「ワークスペースを開く…」（⌘O）でファイルを選ぶこともでき、選んだものは設定に覚える。複数フォルダのワークスペースは「（ワークスペース）」の項目で始めると、VSCode と同じくそのフォルダだけが見える（ツリー・⌘P・検索・差分はフォルダごと、エージェントは1つ目のフォルダで起動して残りを --add-dir で渡す）
-- セッションを覚える: 閉じて開き直すと、サイドバーの「前回のセッション」から再開できる（開いていたファイルのタブも戻る）。claude は `--session-id` で決めた会話を `--resume` で、codex は `~/.codex/sessions` から見つけた会話を `codex resume` で、続きから戻る。そのほかは同じフォルダで開き直す。覚えているのは `~/.config/paispace/sessions.json`
-- エージェントが呼んだエージェントが見える: 呼ばれた側の記録から拾って、呼んだセッションのカードの下にぶら下げる。クリックすると、頼まれたこと・使ったコマンドと結果・答えを右のパネルで見られる（動いている間も更新）
-  - コマンドで呼ばれた codex（`codex exec`）: `~/.codex/sessions` の source=exec の記録
-  - コマンドで呼ばれた claude（`claude -p`）: `~/.claude/projects/<フォルダ>/` の entrypoint=sdk-cli の記録
-  - claude の子エージェント: `~/.claude/projects/<フォルダ>/<会話ID>/subagents/`（paispace が会話 ID を決めているので、どのセッションの子かが確実に分かる）
-  - agy（Antigravity CLI）: `~/.gemini/antigravity-cli/conversations/<会話ID>.db`（SQLite。中身は非公開の Protocol Buffers なので、文字列の部分だけを拾って読む。書き込み中でも読めるよう写しを取ってから開く）。agy が立てた子エージェントも、記録にある親の会話 ID でつなぐ
-  - 呼ばれた側がさらに呼んだもの（再帰）もツリーにする。子エージェントの子は記録の parentAgentId で確実に。コマンドで呼ばれたものは、親の候補が実行したコマンドに「頼んだ文そのもの」があれば確定（実線）、エージェント名だけなら推測（点線）
-- エージェントマップ（⌘G）: 全部のセッションと、そこから呼ばれたエージェントを「グラフ」（箱と矢印）か「時間」（時間の流れ）で見る。親から子へ線でつなぎ、動いている間は帯と線の上を光が流れる。色は claude・codex・子エージェントで分ける。クリックで中身を開く
-- 初めて起動したときに設定画面（あとから ⌘,）。プロジェクトの置き場、入っているエージェント（自動で探す）、エディタを選ぶ
-- お節介はしない: フックを入れない、エージェントの設定に触らない、worktree を勝手に消さない
+A native macOS workspace for Claude Code, Codex and Antigravity.
+When an agent hands work to another agent, paispace draws the call tree live, across vendors.
 
-## 言語
+![macOS](https://img.shields.io/badge/macOS-11%2B-111?logo=apple&logoColor=white)
+![Rust](https://img.shields.io/badge/built%20with-Rust-b7410e?logo=rust&logoColor=white)
+![egui](https://img.shields.io/badge/UI-egui-5b6cf0)
+![No hooks](https://img.shields.io/badge/hooks-none-2ea043)
+![License](https://img.shields.io/badge/license-MIT-blue)
 
-日本語と英語に対応。設定（⌘,）の「言語 / Language」で選ぶ。既定の「自動」は macOS の言語設定に合わせる。設定ファイルでは `language = "auto" | "ja" | "en"`。
+English · [日本語](README.ja.md)
 
-## 入れる
+<br>
+
+<img src="docs/agent-map.png" alt="paispace agent map: two sessions fanning out to claude, codex, agy and subagents" width="920">
+
+</div>
+
+---
+
+## Why
+
+Agents now call other agents. Claude shells out to `codex exec`, spawns `Explore` subagents, or asks `agy` to draw an image — and each tool only shows its own little piece. paispace reads the logs every agent already writes and stitches them into **one live tree**: who called whom, what they were asked, what they did, and what they answered.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/timeline.png" alt="Timeline view"></td>
+<td width="50%"><img src="docs/inspector.png" alt="Inspecting a called agent"></td>
+</tr>
+<tr>
+<td align="center"><sub><b>Timeline</b> — when each call started, how long it ran</sub></td>
+<td align="center"><sub><b>Inspector</b> — the prompt, every tool call, the answer</sub></td>
+</tr>
+</table>
+
+## Highlights
+
+|  |  |
+|---|---|
+| 🕸 **Agent map** <kbd>⌘G</kbd> | Graph or timeline of every session and every agent it called — recursively. Running calls glow; particles flow along the edges. |
+| 🔀 **Cross-vendor** | Claude Code, Codex and Antigravity (`agy`) in one tree, including Claude subagents and agy's own subagents. |
+| 🧷 **Honest edges** | A solid line means the link is in the logs (or the child's exact prompt appears in the parent's command). A dashed line means it is a guess. |
+| 🙅 **No hooks, read-only** | paispace never edits your agent settings. It only reads files the agents already write on your machine. Nothing is sent anywhere. |
+| ⏯ **Resume** | Quit and come back: sessions reopen where the conversation left off (`claude --resume`, `codex resume`). |
+| 🌿 **Worktrees** | Type a branch name and the agent starts in its own git worktree. |
+| ✍️ **Edit & ask** | Open files in tabs, edit, save. Select lines and press <kbd>⌘L</kbd> to drop “`src/cart.ts` lines 12–20: …” into the agent's input. |
+| 🗂 **VSCode workspaces** | Open a `.code-workspace` and the agent sees exactly those folders (`--add-dir`), just like VSCode. Recently opened VSCode / Cursor folders show up in the launcher. |
+| 🔔 **Waiting detection** | Each session shows *running / waiting for you / idle*, with a macOS notification when an agent needs you. |
+| 🌐 **English & 日本語** | Follows your macOS language, or pick one in Settings. |
+
+## How the call tree is built
+
+| Agent | Where paispace reads | How the parent is found |
+|---|---|---|
+| Claude subagent | `~/.claude/projects/<dir>/<session>/subagents/agent-*.jsonl` + `.meta.json` | Recorded: parent session ID (paispace picks it with `--session-id`) and `parentAgentId` for nested subagents |
+| `claude -p` | `~/.claude/projects/<dir>/*.jsonl` with `entrypoint: "sdk-cli"` | The caller's command contains the child's exact prompt → solid. Only the name → dashed |
+| `codex exec` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` with `source: "exec"` | Same as above |
+| `agy` | `~/.gemini/antigravity-cli/conversations/<id>.db` (SQLite + protobuf, read from a snapshot) | Same as above; agy's own subagents are linked by the parent ID in their first message |
+
+A caller's command can only be credited as many times as it actually invoked that agent, so two parallel `codex exec` calls do not get pinned on the wrong parent.
+
+## Install
 
 ```sh
-cargo install --path .
+cargo install --git https://github.com/paibot-hq/paispace
 paispace
 ```
 
-Dock から開きたいときは `sh scripts/bundle.sh ~/Applications` で `Paispace.app` を作る。
+Prefer the Dock? Build an app bundle:
 
-`paispace ~/work/x` のようにフォルダを渡すと、新規作成の最初のフォルダがそこになる。`paispace -a claude` で起動と同時に1つ開く。`paispace ~/work/work.code-workspace` でワークスペースのフォルダから選ぶ。
+```sh
+git clone https://github.com/paibot-hq/paispace && cd paispace
+sh scripts/bundle.sh ~/Applications   # → ~/Applications/Paispace.app
+```
 
-## キー
+> [!NOTE]
+> The app is not notarized yet. A build from source runs without Gatekeeper warnings.
 
-| キー | |
-|---|---|
-| ⌘N | 新しいセッション |
-| ⌘O | VSCode のワークスペース（.code-workspace）を開く |
-| ⌘1〜9 / ⌘[ ⌘] | セッションを切り替える |
-| ⌘P | ファイルを名前から開く |
-| ⌘⇧F | 全体を検索 |
-| ⌘S | 保存 |
-| ⌘L | 選んだところをエージェントに聞く |
-| ⌘J | ファイルを開いている間、エージェントを下に出す／隠す |
-| ⌘⌥← → | タブを移る |
-| ⌘E | ファイルパネル |
-| ⌘G | エージェントマップ |
-| ⌘D | 差分パネル |
-| ⌘, | 設定 |
-| ⌘W | ファイルのタブを閉じる（エージェントのタブなら止める） |
-| ⌘C / ⌘V | コピー / 貼り付け |
-| ⌘+ / ⌘- / ⌘0 | 文字の大きさ |
+### Usage
 
-⌘ 以外のキーはすべてそのままエージェントに届く。カードは右クリックでメニュー、ダブルクリックで名前の変更。
+```sh
+paispace                              # launcher opens with the current folder
+paispace ~/work/shop                  # start from a folder
+paispace ~/work/team.code-workspace   # pick from a VSCode workspace
+paispace -a claude                    # open one claude session right away
+```
 
-## 設定 `~/.config/paispace/config.toml`
+On first launch a short setup finds the agents you have installed (claude, codex, gemini, cursor-agent, agy, opencode, …), your projects folder and your editor.
 
-ふつうは設定画面（⌘,）で変える。ファイルを直接書いてもよい。
+## Keyboard
+
+| Key | Action | Key | Action |
+|---|---|---|---|
+| <kbd>⌘N</kbd> | New session | <kbd>⌘G</kbd> | Agent map |
+| <kbd>⌘O</kbd> | Open a `.code-workspace` | <kbd>⌘D</kbd> | Diff panel |
+| <kbd>⌘1</kbd>–<kbd>⌘9</kbd> · <kbd>⌘[</kbd> <kbd>⌘]</kbd> | Switch session | <kbd>⌘E</kbd> | File tree |
+| <kbd>⌘P</kbd> | Open file by name | <kbd>⌘⇧F</kbd> | Search everything |
+| <kbd>⌘L</kbd> | Ask the agent about the selection | <kbd>⌘S</kbd> | Save |
+| <kbd>⌘J</kbd> | Show / hide the agent under the editor | <kbd>⌘⌥←</kbd> <kbd>⌘⌥→</kbd> | Switch tabs |
+| <kbd>⌘W</kbd> | Close tab (or stop the agent) | <kbd>⌘,</kbd> | Settings |
+
+Every other key goes straight to the agent's terminal.
+
+## Configuration
+
+Settings live in `~/.config/paispace/config.toml`. Most people never touch it — use <kbd>⌘,</kbd>.
+
+<details>
+<summary>All options</summary>
 
 ```toml
-project_roots = ["~/work"]    # この中のフォルダが新規作成の一覧に並ぶ
-projects = []                 # 個別に並べたいフォルダ
-workspaces = []               # 並べたい .code-workspace（置き場とその1つ上にあるものは自動）
-vscode_recent = true          # VSCode などで最近開いたものも並べる
+language = "auto"             # auto | ja | en
+project_roots = ["~/work"]    # folders inside these appear in the launcher
+projects = []                 # extra individual folders
+workspaces = []               # .code-workspace files to list
+vscode_recent = true          # also list what you recently opened in VSCode / Cursor
 default_agent = "claude"
-language = "auto"            # 画面の言語: auto / ja / en
-notify = true                 # 手が空いたら通知
-idle_secs = 2.0               # 出力がこの秒数止まったら「止まった」
-min_busy_secs = 5.0           # 入力のあとこの秒数以上動いてから止まったら「待ち」
-font_size = 13.0
 editor_app = "Visual Studio Code"
+notify = true
+font_size = 13.0
+idle_secs = 2.0               # output silent this long → "stopped"
+min_busy_secs = 5.0           # ran this long after your input, then stopped → "waiting for you"
 
 [[agents]]
 name = "claude"
@@ -89,13 +136,31 @@ cmd = "codex"
 
 [[agents]]
 name = "shell"
-cmd = ""                      # 空ならログインシェル
+cmd = ""                      # empty = your login shell
 ```
 
-## 判定のしかた
+</details>
 
-フックを入れずに、出力の流れだけで見ている。最後に入力してから `min_busy_secs` 以上出力が続き、そのあと `idle_secs` 止まったら「待ち」。
+## Status
 
-## 確認用
+paispace is young. It leans on log formats that Claude Code, Codex and Antigravity do not document, so an update to any of them can break part of the map. It runs on macOS only for now.
 
-`PAISPACE_SHOT=out.png PAISPACE_SHOT_SECS=4 paispace -a shell` で、4秒後に自分の画面を PNG に書き出して終わる（`PAISPACE_SHOT_UI=new|diff|files|setup|ask|quick|search|resume|child|map` でその画面を開いた状態に、`PAISPACE_SHOT_OPEN=src/main.rs` でファイルを開いた状態に）。`PAISPACE_CONFIG_DIR` で設定の置き場を変えられる。
+<details>
+<summary>Development</summary>
+
+`cargo test` runs the unit tests, including real pseudo-terminal tests.
+
+paispace can screenshot itself for visual checks:
+
+```sh
+PAISPACE_SHOT=out.png PAISPACE_SHOT_SECS=4 PAISPACE_SHOT_UI=map paispace -a shell
+```
+
+`PAISPACE_SHOT_UI` accepts `new | diff | files | setup | ask | quick | search | resume | child | map | timeline`.
+`PAISPACE_CONFIG_DIR` points paispace at a separate settings folder.
+
+</details>
+
+## License
+
+MIT

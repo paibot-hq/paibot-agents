@@ -538,52 +538,88 @@ pub fn build_tree(all: &[Child], sessions: &[SessionRef]) -> Vec<Vec<Node>> {
     let ids: std::collections::HashSet<&str> = all.iter().map(|c| c.id.as_str()).collect();
     let session_of_conv = |id: &str| sessions.iter().position(|s| s.conv_id.as_deref() == Some(id));
     let mut up: HashMap<String, (Up, bool)> = HashMap::new();
+    // 記録に親が書いてあるもの
+    let mut open: Vec<&Child> = Vec::new();
     for c in all {
         if let Some(pid) = c.parent_agent.as_deref().filter(|p| ids.contains(p) && *p != c.id) {
             up.insert(c.id.clone(), (Up::Child(pid.to_string()), false));
-            continue;
-        }
-        if let Some(i) = c.parent.as_deref().and_then(session_of_conv) {
+        } else if let Some(i) = c.parent.as_deref().and_then(session_of_conv) {
             up.insert(c.id.clone(), (Up::Session(i), false));
-            continue;
+        } else if c.parent.is_none() {
+            open.push(c); // 親のセッションがもういない子エージェントは出さない
         }
-        if c.parent.is_some() {
-            continue; // 親のセッションがもういない
-        }
-        // その子が始まったとき、同じフォルダで動いていた候補のうち、実際にその子を呼んだ手がかりがあるもの。
-        // 頼んだ文そのものがコマンドにあれば確か（実線）、エージェント名だけなら推測（点線）
-        let grace = Duration::from_secs(2);
-        let mut best: Option<(u8, SystemTime, Up)> = None;
-        let mut consider = |score: u8, started: SystemTime, up: Up| {
-            if best.as_ref().is_none_or(|(s, t, _)| score > *s || (score == *s && started > *t)) {
-                best = Some((score, started, up));
-            }
-        };
+    }
+    open.sort_by_key(|c| c.started);
+
+    // 候補が「その種類のエージェントを呼んだ回数」。確定でつないだ分は差し引き、
+    // 名前だけの推測は、まだ回数が残っている候補にしか付けない
+    let name_of = |c: &Child| match c.kind {
+        Kind::Codex => "codex",
+        Kind::Claude | Kind::ClaudeSub => "claude",
+        Kind::Agy => "agy",
+    };
+    let calls = |cmds: &[String], name: &str| cmds.iter().filter(|c| c.contains(name)).count();
+    let mut left: HashMap<(String, &str), usize> = HashMap::new();
+    let key_child = |id: &str| format!("c:{id}");
+    let key_session = |i: usize| format!("s:{i}");
+    let grace = Duration::from_secs(2);
+
+    // 子が始まったとき、同じフォルダで動いていた候補（呼んだ側になりうるもの）
+    let candidates = |c: &Child| -> Vec<(String, Up, SystemTime, Option<Vec<String>>)> {
+        let mut v = Vec::new();
         for k in all.iter().filter(|k| k.id != c.id && k.started < c.started && c.cwd.starts_with(&k.cwd)) {
             if k.status == Status::Running || k.updated + grace >= c.started {
-                let e = evidence(&k.commands, c);
-                if e > 0 {
-                    consider(e, k.started, Up::Child(k.id.clone()));
-                }
+                v.push((key_child(&k.id), Up::Child(k.id.clone()), k.started, Some(k.commands.clone())));
             }
         }
         for (i, s) in sessions.iter().enumerate() {
             if s.conv_id.as_deref() == Some(c.id.as_str()) || s.started > c.started + grace || !s.roots.iter().any(|r| c.cwd.starts_with(r)) {
                 continue;
             }
-            match &s.commands {
-                // 記録が読めるセッションは、手がかりがあるときだけ
-                Some(cmds) => {
-                    let e = evidence(cmds, c);
-                    if e > 0 {
-                        consider(e, s.started, Up::Session(i));
-                    }
+            v.push((key_session(i), Up::Session(i), s.started, s.commands.clone()));
+        }
+        v
+    };
+
+    // 1回目: 頼んだ文そのものがコマンドにあるもの（確か）
+    let mut rest: Vec<&Child> = Vec::new();
+    for c in open {
+        let best = candidates(c)
+            .into_iter()
+            .filter(|(_, _, _, cmds)| cmds.as_ref().is_some_and(|cm| evidence(cm, c) == 2))
+            .max_by_key(|(_, _, t, _)| *t);
+        match best {
+            Some((key, u, _, cmds)) => {
+                let name = name_of(c);
+                let n = left.entry((key, name)).or_insert_with(|| calls(cmds.as_deref().unwrap_or(&[]), name));
+                *n = n.saturating_sub(1);
+                up.insert(c.id.clone(), (u, false));
+            }
+            None => rest.push(c),
+        }
+    }
+    // 2回目: 名前だけ（推測）。回数が残っている候補だけ。どれもなければ記録の読めないセッション（シェルなど）
+    for c in rest {
+        let name = name_of(c);
+        let mut best: Option<(u8, SystemTime, String, Up)> = None;
+        for (key, u, t, cmds) in candidates(c) {
+            let score = match &cmds {
+                Some(cm) => {
+                    let n = *left.entry((key.clone(), name)).or_insert_with(|| calls(cm, name));
+                    if n > 0 && evidence(cm, c) >= 1 { 1 } else { continue }
                 }
-                // 読めないセッション（シェルなど）は、手がかりなしの候補
-                None => consider(0, s.started, Up::Session(i)),
+                None => 0,
+            };
+            if best.as_ref().is_none_or(|(s, bt, _, _)| score > *s || (score == *s && t > *bt)) {
+                best = Some((score, t, key, u));
             }
         }
-        if let Some((score, _, u)) = best {
+        if let Some((score, _, key, u)) = best {
+            if score == 1 {
+                if let Some(n) = left.get_mut(&(key, name)) {
+                    *n = n.saturating_sub(1);
+                }
+            }
             let guessed = score < 2 && matches!(u, Up::Child(_));
             up.insert(c.id.clone(), (u, guessed));
         }
@@ -783,7 +819,10 @@ mod tests {
         y2.commands = vec!["Bash  codex exec --help".into()];
         let mut z2 = child("z2", "/w", 30, 35, Status::Done);
         z2.prompt = "まったく別の頼みごと".into();
-        let tree = build_tree(&[s1, s2, y, z, y2, z2], &sessions);
+        // シェルが直接呼んだ codex（y が動いている間に始まったが、y の codex 呼び出しは z で使い切っている）
+        let mut d = child("d", "/w", 26, 32, Status::Done);
+        d.prompt = "Find the bug in cart".into();
+        let tree = build_tree(&[s1, s2, y, z, y2, z2, d], &sessions);
 
         // claude のセッションには子エージェントだけ。s1 が同じ時間に動いていても z は付かない
         assert_eq!(tree[0].len(), 1);
@@ -794,13 +833,13 @@ mod tests {
 
         // シェルのセッションに y と y2。z は頼んだ文があるので y の下（実線）、z2 は名前だけなので y2 の下（点線）
         let ids: Vec<&str> = tree[1].iter().map(|n| n.child.id.as_str()).collect();
-        assert_eq!(ids, vec!["y", "y2"]);
+        assert_eq!(ids, vec!["y", "y2", "d"]);
         assert_eq!(tree[1][0].kids[0].child.id, "z");
         assert!(!tree[1][0].kids[0].guessed);
         assert_eq!(tree[1][1].kids[0].child.id, "z2");
         assert!(tree[1][1].kids[0].guessed);
         let flat: Vec<(usize, &str)> = flatten(&tree[1]).into_iter().map(|(d, n)| (d, n.child.id.as_str())).collect();
-        assert_eq!(flat, vec![(0, "y"), (1, "z"), (0, "y2"), (1, "z2")]);
+        assert_eq!(flat, vec![(0, "y"), (1, "z"), (0, "y2"), (1, "z2"), (0, "d")]);
     }
 
     #[test]
