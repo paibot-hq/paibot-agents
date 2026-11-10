@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 画面を描き直してほしいときに呼ぶ
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -39,7 +39,8 @@ pub struct Session {
     pub started_at: std::time::SystemTime,
     /// ワークスペースで始めたなら、そのフォルダたち（cwd は1つ目）
     pub roots: Vec<PathBuf>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// エージェントへの入力は専用のスレッドで書く（相手が読まなくても画面が止まらないように）
+    input: mpsc::Sender<Vec<u8>>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
     shared: Arc<Shared>,
@@ -82,13 +83,22 @@ impl Session {
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader()?;
-        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(pair.master.take_writer()?));
+        let mut writer = pair.master.take_writer()?;
+        let (input, input_rx) = mpsc::channel::<Vec<u8>>();
+        thread::spawn(move || {
+            for bytes in input_rx {
+                if writer.write_all(&bytes).is_err() {
+                    break;
+                }
+                let _ = writer.flush();
+            }
+        });
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, scrollback)));
         let shared = Arc::new(Shared { last_output: Mutex::new(Instant::now()), eof: AtomicBool::new(false) });
 
         {
             let parser = parser.clone();
-            let writer = writer.clone();
+            let input = input.clone();
             let shared = shared.clone();
             thread::spawn(move || {
                 let mut buf = [0u8; 16 * 1024];
@@ -103,9 +113,7 @@ impl Session {
                                 replies(data, p.screen())
                             };
                             if !reply.is_empty() {
-                                let mut w = writer.lock().unwrap();
-                                let _ = w.write_all(&reply);
-                                let _ = w.flush();
+                                let _ = input.send(reply);
                             }
                             *shared.last_output.lock().unwrap() = Instant::now();
                             wake();
@@ -133,7 +141,7 @@ impl Session {
             base_cmd: agent.cmd.clone(),
             started_at: std::time::SystemTime::now(),
             roots: Vec::new(),
-            writer,
+            input,
             master: pair.master,
             child,
             shared,
@@ -154,10 +162,7 @@ impl Session {
         if self.exit.is_some() {
             return;
         }
-        let mut w = self.writer.lock().unwrap();
-        let _ = w.write_all(bytes);
-        let _ = w.flush();
-        drop(w);
+        let _ = self.input.send(bytes.to_vec());
         self.last_input = Instant::now();
         self.parser.lock().unwrap().set_scrollback(0);
     }
@@ -268,4 +273,40 @@ fn is_chrome(t: &str) -> bool {
         || t.contains("⏵⏵")
         || t.contains("for shortcuts")
         || t.contains("to cycle")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spawn(cmd: &str) -> Session {
+        let agent = Agent { name: "t".into(), cmd: cmd.into() };
+        Session::spawn("t".into(), &agent, std::env::temp_dir(), (24, 80), 100, Arc::new(|| {})).unwrap()
+    }
+
+    #[test]
+    fn input_reaches_the_program() {
+        let mut s = spawn("cat");
+        std::thread::sleep(Duration::from_millis(1500));
+        s.write("こんにちは abc\r".as_bytes());
+        let mut ok = false;
+        for _ in 0..40 {
+            std::thread::sleep(Duration::from_millis(100));
+            if s.parser.lock().unwrap().screen().contents().contains("こんにちは abc") {
+                ok = true;
+                break;
+            }
+        }
+        assert!(ok, "画面: {}", s.parser.lock().unwrap().screen().contents());
+    }
+
+    #[test]
+    fn writing_to_a_program_that_never_reads_does_not_block() {
+        let mut s = spawn("sleep 30");
+        let big = vec![b'x'; 200 * 1024];
+        let t = Instant::now();
+        s.write(&big);
+        s.write(b"more");
+        assert!(t.elapsed() < Duration::from_millis(200), "{:?}", t.elapsed());
+    }
 }

@@ -244,51 +244,75 @@ fn flush(
     }
 }
 
-fn input(ui: &Ui, s: &mut Session, st: &mut TermState) {
-    let events = ui.input(|i| i.events.clone());
-    // 変換を確定したEnterで、そのまま送信してしまわないように
+/// 端末に渡すもの
+#[derive(Debug, PartialEq)]
+pub enum Out {
+    Bytes(Vec<u8>),
+    Paste(String),
+    Copy,
+}
+
+/// キーと日本語入力のイベントを、端末に渡すものに変える。preedit は変換中の文字
+pub fn translate(events: &[Event], preedit: &mut String, app_cursor: bool) -> Vec<Out> {
+    // 変換を確定した Enter で、そのまま送信してしまわないように
     let committed = events.iter().any(|e| matches!(e, Event::Ime(ImeEvent::Commit(_))));
-    let app_cursor = s.parser.lock().unwrap().screen().application_cursor();
+    let mut out = Vec::new();
     for ev in events {
         match ev {
-            Event::Ime(ImeEvent::Preedit(p)) => st.preedit = p,
+            Event::Ime(ImeEvent::Preedit(p)) => *preedit = p.clone(),
+            // 変換中の文字を全部消した・Esc でやめた・入力が切れたとき、macOS では Preedit("") ではなくこれが来る。
+            // ここで空にしないと「まだ変換中」と思い込んでキーを全部捨ててしまう
+            Event::Ime(ImeEvent::Disabled) => preedit.clear(),
             Event::Ime(ImeEvent::Commit(t)) => {
-                st.preedit.clear();
+                preedit.clear();
                 if !t.is_empty() {
-                    s.write(t.as_bytes());
-                    st.sel = None;
+                    out.push(Out::Bytes(t.as_bytes().to_vec()));
                 }
             }
             Event::Text(t) => {
-                if st.preedit.is_empty() {
-                    s.write(t.as_bytes());
-                    st.sel = None;
+                if preedit.is_empty() {
+                    out.push(Out::Bytes(t.as_bytes().to_vec()));
                 }
             }
             Event::Key { key, pressed: true, modifiers, .. } => {
-                if modifiers.mac_cmd || !st.preedit.is_empty() {
+                if modifiers.mac_cmd || !preedit.is_empty() {
                     continue;
                 }
-                if key == egui::Key::Enter && committed {
+                if *key == egui::Key::Enter && committed {
                     continue;
                 }
-                if let Some(b) = keys::encode(key, modifiers, app_cursor) {
-                    s.write(&b);
-                    st.sel = None;
+                if let Some(b) = keys::encode(*key, *modifiers, app_cursor) {
+                    out.push(Out::Bytes(b));
                 }
             }
-            Event::Paste(t) => {
+            Event::Paste(t) => out.push(Out::Paste(t.clone())),
+            Event::Copy | Event::Cut => out.push(Out::Copy),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn input(ui: &Ui, s: &mut Session, st: &mut TermState) {
+    let events = ui.input(|i| i.events.clone());
+    let app_cursor = s.parser.lock().unwrap().screen().application_cursor();
+    for o in translate(&events, &mut st.preedit, app_cursor) {
+        match o {
+            Out::Bytes(b) => {
+                s.write(&b);
+                st.sel = None;
+            }
+            Out::Paste(t) => {
                 s.paste(&t);
                 st.sel = None;
             }
-            Event::Copy | Event::Cut => {
+            Out::Copy => {
                 if let Some((a, b)) = st.sel.filter(|(a, b)| a != b) {
                     let (a, b) = ordered(a, b);
                     let text = s.parser.lock().unwrap().screen().contents_between(a.0, a.1, b.0, b.1);
                     ui.ctx().copy_text(text);
                 }
             }
-            _ => {}
         }
     }
 }
@@ -313,5 +337,53 @@ fn indexed(i: u8) -> Color32 {
             let g = 8 + 10 * (i - 232);
             Color32::from_rgb(g, g, g)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Key, Modifiers};
+
+    fn key(k: Key) -> Event {
+        Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }
+    }
+    fn ime(e: ImeEvent) -> Event {
+        Event::Ime(e)
+    }
+    fn bytes(out: Vec<Out>) -> Vec<u8> {
+        out.into_iter().flat_map(|o| if let Out::Bytes(b) = o { b } else { vec![] }).collect()
+    }
+
+    #[test]
+    fn commit_sends_text_once() {
+        let mut pre = String::new();
+        let ev = [ime(ImeEvent::Enabled), ime(ImeEvent::Preedit("か".into()))];
+        assert!(bytes(translate(&ev, &mut pre, false)).is_empty());
+        assert_eq!(pre, "か");
+        // 確定の Enter は送らない
+        let ev = [ime(ImeEvent::Commit("漢字".into())), ime(ImeEvent::Disabled), key(Key::Enter)];
+        assert_eq!(bytes(translate(&ev, &mut pre, false)), "漢字".as_bytes());
+        assert!(pre.is_empty());
+        // その後の Enter は送る
+        assert_eq!(bytes(translate(&[key(Key::Enter)], &mut pre, false)), b"\r");
+    }
+
+    #[test]
+    fn cancelled_composition_does_not_freeze() {
+        // 変換中の文字を消し切った（macOS では Preedit("") ではなく Disabled が来る）
+        let mut pre = String::new();
+        translate(&[ime(ImeEvent::Preedit("ka".into()))], &mut pre, false);
+        translate(&[ime(ImeEvent::Disabled)], &mut pre, false);
+        assert!(pre.is_empty());
+        // そのあと打ったものはちゃんと届く
+        let ev = [Event::Text("a".into()), key(Key::Backspace), key(Key::Enter)];
+        assert_eq!(bytes(translate(&ev, &mut pre, false)), b"a\x7f\r");
+    }
+
+    #[test]
+    fn keys_go_to_ime_while_composing() {
+        let mut pre = "か".to_string();
+        assert!(bytes(translate(&[key(Key::Backspace), key(Key::ArrowLeft)], &mut pre, false)).is_empty());
     }
 }
