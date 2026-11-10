@@ -233,7 +233,12 @@ impl PaispaceApp {
         }
         match shot_ui.as_str() {
             "resume" => app.apply(Action::ResumeAll),
-            "new" => app.open_new(),
+            "new" => {
+                app.open_new();
+                if let (Ok(f), Some(p)) = (std::env::var("PAISPACE_SHOT_WORKSPACE"), app.picker.as_mut()) {
+                    p.open_workspace(PathBuf::from(f));
+                }
+            }
             "diff" if !app.sessions.is_empty() => app.apply(Action::Diff(0)),
             "files" | "ask" | "quick" | "search" if !app.sessions.is_empty() => {
                 app.apply(Action::Files(0));
@@ -607,6 +612,12 @@ impl PaispaceApp {
         }
         if take(Key::N) {
             self.open_new();
+        }
+        if take(Key::O) {
+            self.open_new();
+            if let Some(p) = &mut self.picker {
+                p.open_workspace_dialog();
+            }
         }
         if take(Key::D) && !self.sessions.is_empty() {
             self.apply(Action::Diff(self.sel));
@@ -988,7 +999,18 @@ impl PaispaceApp {
 
     fn dialogs(&mut self, ctx: &egui::Context) {
         if let Some(mut p) = self.picker.take() {
-            match p.show(ctx, &self.cfg) {
+            let shown = p.show(ctx, &self.cfg);
+            // 開いたワークスペースは設定に覚えて、次から一覧に出す
+            if let Some(f) = p.opened_workspace.take() {
+                let t = tilde(&f);
+                if !self.cfg.workspaces.contains(&t) {
+                    self.cfg.workspaces.insert(0, t);
+                    if config::exists() {
+                        let _ = config::save(&self.cfg);
+                    }
+                }
+            }
+            match shown {
                 picker::Outcome::Keep => self.picker = Some(p),
                 picker::Outcome::Cancel => {}
                 picker::Outcome::Start { dir, agent, branch } => {

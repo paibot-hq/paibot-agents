@@ -1,5 +1,7 @@
 //! 新しいセッションを始める画面。プロジェクトを選んで Enter ですぐ始まる
 
+use std::path::PathBuf;
+
 use eframe::egui::{self, Align, Frame, Id, Key, Label, Layout, Margin, Modifiers, RichText, ScrollArea, Sense, Stroke, TextEdit, vec2};
 
 use crate::config::Config;
@@ -16,6 +18,9 @@ pub struct Picker {
     projects: Vec<Project>,
     first: bool,
     scroll_to_hi: bool,
+    /// 開いたワークスペース（設定に覚えてもらう）
+    pub opened_workspace: Option<PathBuf>,
+    pub message: Option<String>,
 }
 
 pub enum Outcome {
@@ -35,7 +40,39 @@ impl Picker {
             projects: projects::list(cfg, recent),
             first: true,
             scroll_to_hi: false,
+            opened_workspace: None,
+            message: None,
         }
+    }
+
+    /// .code-workspace を選んで、そのフォルダを一覧の先頭に出す
+    pub fn open_workspace_dialog(&mut self) {
+        let Some(f) = rfd::FileDialog::new()
+            .add_filter("VSCode ワークスペース", &["code-workspace"])
+            .set_directory(expand("~"))
+            .pick_file()
+        else {
+            return;
+        };
+        self.open_workspace(f);
+    }
+
+    pub fn open_workspace(&mut self, f: PathBuf) {
+        let list = projects::workspace_projects(&f);
+        if list.is_empty() {
+            self.message = Some(format!("{} にフォルダが見つかりませんでした", tilde(&f)));
+            return;
+        }
+        let paths: Vec<String> = list.iter().map(|p| p.path.clone()).collect();
+        self.projects.retain(|p| !paths.contains(&p.path));
+        for (i, p) in list.into_iter().enumerate() {
+            self.projects.insert(i, p);
+        }
+        self.query.clear();
+        self.hi = 0;
+        self.scroll_to_hi = true;
+        self.message = None;
+        self.opened_workspace = Some(f);
     }
 
     fn filtered(&self) -> Vec<Project> {
@@ -87,6 +124,7 @@ impl Picker {
 
         let mut out = Outcome::Keep;
         let mut start_dir: Option<String> = None;
+        let mut open_ws = ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::O));
         let screen = ctx.screen_rect();
         let modal = egui::Modal::new(Id::new("picker")).show(ctx, |ui| {
             ui.set_width(680.0_f32.min(screen.width() - 80.0));
@@ -131,6 +169,9 @@ impl Picker {
             if r.changed() {
                 self.hi = 0;
             }
+            if let Some(m) = &self.message {
+                ui.label(RichText::new(m).size(12.0).color(WAITING));
+            }
             ui.add_space(8.0);
 
             // 一覧
@@ -144,7 +185,7 @@ impl Picker {
                     ui.add_space(20.0);
                     ui.vertical_centered(|ui| {
                         let msg = if self.projects.is_empty() {
-                            "プロジェクトがまだありません。下の「フォルダを選ぶ…」か、設定（⌘,）でプロジェクトの置き場を足してください"
+                            "プロジェクトがまだありません。下の「ワークスペースを開く…」「フォルダを選ぶ…」か、設定（⌘,）で置き場を足してください"
                         } else {
                             "見つかりません"
                         };
@@ -218,6 +259,9 @@ impl Picker {
                 if ui.add_enabled(can, start).clicked() {
                     start_dir = chosen.as_ref().map(|c| c.0.clone());
                 }
+                if ui.button(format!("{}  ワークスペースを開く…", crate::ui::icon::CODE)).on_hover_text(".code-workspace を選ぶ  ⌘O").clicked() {
+                    open_ws = true;
+                }
                 if ui.button("フォルダを選ぶ…").clicked() {
                     let base = chosen.as_ref().map(|c| expand(&c.0)).unwrap_or_else(|| expand("~"));
                     if let Some(p) = rfd::FileDialog::new().set_directory(base).pick_folder() {
@@ -232,6 +276,10 @@ impl Picker {
                 start_dir = chosen.map(|c| c.0);
             }
         });
+        if open_ws {
+            self.open_workspace_dialog();
+            return Outcome::Keep;
+        }
         if modal.should_close() {
             return Outcome::Cancel;
         }

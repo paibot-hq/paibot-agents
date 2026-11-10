@@ -83,15 +83,9 @@ pub fn list(cfg: &Config, recent: &[String]) -> Vec<Project> {
         }
     }
     for f in ws_files {
-        let Some(ws) = vscode::parse_workspace(&f) else { continue };
-        let group = format!("VSCode ワークスペース: {}", ws.name);
-        if ws.folders.len() > 1 {
-            if let Some(parent) = vscode::common_parent(&ws.folders) {
-                add(&mut out, &parent, &group, Some(format!("{}（全体）", ws.name)));
-            }
-        }
-        for d in &ws.folders {
-            add(&mut out, d, &group, None);
+        for p in workspace_projects(&f) {
+            let path = expand(&p.path);
+            add(&mut out, &path, &p.group, Some(p.name));
         }
     }
 
@@ -122,6 +116,23 @@ pub fn list(cfg: &Config, recent: &[String]) -> Vec<Project> {
     rest.sort_by(|a, b| b.modified.cmp(&a.modified));
     out.extend(rest);
     out
+}
+
+/// .code-workspace のフォルダ（複数なら共通の親を「（全体）」として先頭に）
+pub fn workspace_projects(file: &Path) -> Vec<Project> {
+    let Some(ws) = vscode::parse_workspace(file) else { return Vec::new() };
+    let group = format!("VSCode ワークスペース: {}", ws.name);
+    let mut v = Vec::new();
+    if ws.folders.len() > 1 {
+        if let Some(parent) = vscode::common_parent(&ws.folders) {
+            if let Some(mut p) = project(&parent, &group) {
+                p.name = format!("{}（全体）", ws.name);
+                v.push(p);
+            }
+        }
+    }
+    v.extend(ws.folders.iter().filter_map(|d| project(d, &group)));
+    v
 }
 
 /// 置き場の候補（子にgitリポジトリがあるもの）
