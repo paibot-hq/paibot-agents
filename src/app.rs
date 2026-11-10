@@ -40,6 +40,8 @@ enum Side {
 /// 右のパネルで見ている「呼ばれた codex」
 struct ChildView {
     id: String,
+    kind: children::Kind,
+    label: String,
     file: PathBuf,
     steps: Vec<children::Step>,
     done: bool,
@@ -48,7 +50,7 @@ struct ChildView {
 
 impl ChildView {
     fn open(c: &children::Child) -> Self {
-        let mut v = Self { id: c.id.clone(), file: c.file.clone(), steps: Vec::new(), done: false, mtime: None };
+        let mut v = Self { id: c.id.clone(), kind: c.kind, label: c.label.clone(), file: c.file.clone(), steps: Vec::new(), done: c.status == children::Status::Done, mtime: None };
         v.refresh();
         v
     }
@@ -56,9 +58,12 @@ impl ChildView {
     fn refresh(&mut self) {
         let m = std::fs::metadata(&self.file).and_then(|m| m.modified()).ok();
         if m != self.mtime || self.mtime.is_none() {
-            let (steps, done) = children::read_steps(&self.file);
+            let (steps, done) = children::read_steps(self.kind, &self.file);
             self.steps = steps;
-            self.done = done;
+            // 子エージェントは meta.json の finished が確か
+            if self.kind != children::Kind::ClaudeSub || done {
+                self.done = done || self.done;
+            }
             self.mtime = m;
         }
     }
@@ -192,7 +197,7 @@ pub struct PaispaceApp {
     git_dirs: Arc<Mutex<Vec<PathBuf>>>,
     git_info: Arc<Mutex<HashMap<PathBuf, git::Info>>>,
     children: Arc<Mutex<Vec<children::Child>>>,
-    children_since: Arc<Mutex<Option<std::time::SystemTime>>>,
+    children_watch: Arc<Mutex<children::Watch>>,
     child_view: Option<ChildView>,
     wake: Wake,
     allow_close: bool,
@@ -215,8 +220,8 @@ impl PaispaceApp {
         let git_info = Arc::new(Mutex::new(HashMap::new()));
         git::spawn_watcher(git_dirs.clone(), git_info.clone(), wake.clone());
         let kids = Arc::new(Mutex::new(Vec::new()));
-        let kids_since = Arc::new(Mutex::new(None));
-        children::spawn_watcher(kids_since.clone(), kids.clone(), wake.clone());
+        let kids_watch = Arc::new(Mutex::new(children::Watch::default()));
+        children::spawn_watcher(kids_watch.clone(), kids.clone(), wake.clone());
         let mut recent = config::load_recent();
         if recent.is_empty() && workspace.is_none() {
             recent.push(tilde(&dir));
@@ -246,7 +251,7 @@ impl PaispaceApp {
             git_dirs,
             git_info,
             children: kids,
-            children_since: kids_since,
+            children_watch: kids_watch,
             child_view: None,
             wake,
             allow_close: false,
@@ -613,6 +618,13 @@ impl PaispaceApp {
     fn children_by_session(&self) -> Vec<Vec<children::Child>> {
         let mut out = vec![Vec::new(); self.sessions.len()];
         for c in self.children.lock().unwrap().iter() {
+            // 子エージェントは親の会話 ID で確実に付ける
+            if let Some(parent) = &c.parent {
+                if let Some(i) = self.sessions.iter().position(|s| s.resume_id.as_deref() == Some(parent.as_str())) {
+                    out[i].push(c.clone());
+                }
+                continue;
+            }
             let owner = self
                 .sessions
                 .iter()
@@ -631,8 +643,17 @@ impl PaispaceApp {
 
     fn tick(&mut self) {
         // 呼ばれた codex を探す範囲（動いているセッションのうち一番古い開始時刻から）
-        let since = self.sessions.iter().filter(|s| s.exit.is_none()).map(|s| s.started_at).min();
-        *self.children_since.lock().unwrap() = since;
+        {
+            let alive: Vec<&Session> = self.sessions.iter().filter(|s| s.exit.is_none()).collect();
+            let mut w = self.children_watch.lock().unwrap();
+            w.since = alive.iter().map(|s| s.started_at).min();
+            w.dirs = alive.iter().flat_map(|s| s.view_roots()).collect();
+            w.claude_ids = alive
+                .iter()
+                .filter(|s| resume::kind(&s.base_cmd) == resume::Kind::Claude)
+                .filter_map(|s| s.resume_id.clone().map(|id| (id, s.cwd.clone())))
+                .collect();
+        }
         let now = Instant::now();
         let idle = Duration::from_secs_f64(self.cfg.idle_secs.max(0.2));
         let min_busy = Duration::from_secs_f64(self.cfg.min_busy_secs.max(0.0));
@@ -990,7 +1011,7 @@ impl PaispaceApp {
                                     children::Status::Stopped => (ui::icon::WARNING, WAITING),
                                 };
                                 ui.label(RichText::new(g).size(11.0).color(col));
-                                ui.label(RichText::new("codex").font(ui::bold(11.0)).color(MUTED));
+                                ui.label(RichText::new(&c.label).font(ui::bold(11.0)).color(MUTED));
                                 ui.add(Label::new(RichText::new(c.prompt.replace('\n', " ")).size(11.0).color(FAINT)).truncate());
                             });
                         });
@@ -1093,12 +1114,21 @@ impl PaispaceApp {
             return;
         };
         v.refresh();
+        // 終わったかどうかは、見張り役が持っている最新の状態に合わせる（子エージェントは meta.json の finished）
+        if self.children.lock().unwrap().iter().any(|c| c.id == v.id && c.status == children::Status::Done) {
+            v.done = true;
+        }
         let running = !v.done && v.mtime.is_some_and(|m| m.elapsed().unwrap_or_default() < std::time::Duration::from_secs(90));
         let mut close = false;
         ui.horizontal(|ui| {
             ui.label(RichText::new(ui::icon::ROBOT).size(15.0).color(ACCENT));
-            ui.label(RichText::new("codex").font(ui::bold(13.5)).color(TEXT));
-            ui.label(RichText::new("ほかのエージェントから呼ばれた").size(11.0).color(FAINT));
+            ui.label(RichText::new(&v.label).font(ui::bold(13.5)).color(TEXT));
+            let how = match v.kind {
+                children::Kind::Codex => "コマンドで呼ばれた codex",
+                children::Kind::Claude => "コマンドで呼ばれた claude",
+                children::Kind::ClaudeSub => "claude の子エージェント",
+            };
+            ui.label(RichText::new(how).size(11.0).color(FAINT));
             let (t, c) = if v.done { ("終わった", OK) } else if running { ("動いています", ACCENT) } else { ("途中で止まった", WAITING) };
             ui.label(RichText::new(t).size(11.0).color(c));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
