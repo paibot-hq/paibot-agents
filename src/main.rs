@@ -41,11 +41,17 @@ fn main() -> Result<()> {
                 println!("mure {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
+            _ if dir.is_some() => {
+                anyhow::bail!("フォルダは1つだけ指定できます（mure --help）");
+            }
             _ => dir = Some(PathBuf::from(a)),
         }
     }
     let dir = match dir {
-        Some(d) => std::fs::canonicalize(&d).map_err(|e| anyhow::anyhow!("{}: {e}", d.display()))?,
+        Some(d) => std::fs::canonicalize(&d)
+            .ok()
+            .filter(|p| p.is_dir())
+            .ok_or_else(|| anyhow::anyhow!("フォルダが見つかりません: {}", d.display()))?,
         None => std::env::current_dir()?,
     };
     let (cfg, cfg_err) = config::load();
