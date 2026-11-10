@@ -1,6 +1,6 @@
 //! ⌘⇧F: フォルダ全体を検索する
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use eframe::egui::{self, Color32, FontId, Frame, Id, Label, Margin, RichText, ScrollArea, Sense, TextEdit, Ui};
@@ -11,6 +11,7 @@ const MAX_HITS: usize = 3000;
 
 struct Hit {
     file: String,
+    abs: PathBuf,
     line: usize,
     text: String,
 }
@@ -30,12 +31,12 @@ fn has_rg() -> bool {
 }
 
 impl Search {
-    pub fn set_and_run(&mut self, q: &str, root: &Path) {
+    pub fn set_and_run(&mut self, q: &str, roots: &[PathBuf]) {
         self.query = q.to_string();
-        self.run(root);
+        self.run(roots);
     }
 
-    fn run(&mut self, root: &Path) {
+    fn run(&mut self, roots: &[PathBuf]) {
         let q = self.query.trim().to_string();
         self.hits.clear();
         self.error = None;
@@ -44,7 +45,11 @@ impl Search {
             self.searched = None;
             return;
         }
-        let out = if has_rg() {
+        let rg = has_rg();
+        let multi = roots.len() > 1;
+        for root in roots {
+        let prefix = if multi { format!("{}/", root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()) } else { String::new() };
+        let out = if rg {
             Command::new("rg")
                 .current_dir(root)
                 .args(["--line-number", "--no-heading", "--color", "never", "--smart-case", "--fixed-strings", "--max-columns", "400", "--", &q, "."])
@@ -62,17 +67,19 @@ impl Search {
                     let mut it = l.splitn(3, ':');
                     let (Some(f), Some(n), Some(t)) = (it.next(), it.next(), it.next()) else { continue };
                     let Ok(line) = n.parse() else { continue };
-                    self.hits.push(Hit { file: f.trim_start_matches("./").to_string(), line, text: t.trim().to_string() });
+                    let rel = f.trim_start_matches("./");
+                    self.hits.push(Hit { file: format!("{prefix}{rel}"), abs: root.join(rel), line, text: t.trim().to_string() });
                 }
-                self.hits.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
             }
             Err(e) => self.error = Some(format!("検索できませんでした: {e}")),
         }
+        }
+        self.hits.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
         self.searched = Some(q);
     }
 
     /// クリックされたら (ファイル, 行) を返す
-    pub fn show(&mut self, ui: &mut Ui, root: &Path) -> Option<(PathBuf, usize)> {
+    pub fn show(&mut self, ui: &mut Ui, roots: &[PathBuf]) -> Option<(PathBuf, usize)> {
         let mut open = None;
         let r = ui.add(
             TextEdit::singleline(&mut self.query)
@@ -86,7 +93,7 @@ impl Search {
             self.focus = false;
         }
         if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            self.run(root);
+            self.run(roots);
             r.request_focus();
         }
         ui.add_space(6.0);
@@ -126,7 +133,7 @@ impl Search {
                         });
                     });
                 if ui.interact(inner.response.rect, id, Sense::click()).clicked() {
-                    open = Some((root.join(&h.file), h.line));
+                    open = Some((h.abs.clone(), h.line));
                 }
             }
         });

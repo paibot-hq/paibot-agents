@@ -29,6 +29,28 @@ pub fn kind(cmd: &str) -> Kind {
     }
 }
 
+fn quote(p: &Path) -> String {
+    format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"))
+}
+
+/// ワークスペースの残りのフォルダもエージェントに見せる指定を足す
+pub fn add_dirs(cmd: &str, dirs: &[PathBuf]) -> String {
+    if dirs.is_empty() {
+        return cmd.to_string();
+    }
+    let first = cmd.split_whitespace().next().unwrap_or("");
+    let flag = match first.rsplit('/').next().unwrap_or(first) {
+        "claude" | "codex" => "--add-dir",
+        "gemini" => "--include-directories",
+        _ => return cmd.to_string(),
+    };
+    let mut out = cmd.to_string();
+    for d in dirs {
+        out.push_str(&format!(" {flag} {}", quote(d)));
+    }
+    out
+}
+
 /// ランダムな UUID（v4）
 pub fn new_uuid() -> String {
     let mut b = [0u8; 16];
@@ -137,6 +159,9 @@ pub struct Saved {
     /// 開いていたファイル
     #[serde(default)]
     pub tabs: Vec<PathBuf>,
+    /// ワークスペースのフォルダ（ワークスペースで始めたときだけ）
+    #[serde(default)]
+    pub roots: Vec<PathBuf>,
 }
 
 /// claude がその会話を保存しているか（一度も話しかけていないと保存されない）
@@ -200,6 +225,10 @@ mod tests {
         assert_eq!(start_cmd("codex").1, None);
         assert!(resume_cmd("", "x").is_none());
         assert_eq!(kind("/Users/a/.claude/local/claude --model opus"), Kind::Claude);
+        let d = vec![PathBuf::from("/w/b"), PathBuf::from("/w/it's")];
+        assert_eq!(add_dirs("claude", &d), "claude --add-dir '/w/b' --add-dir '/w/it'\\''s'");
+        assert_eq!(add_dirs("gemini", &d[..1]), "gemini --include-directories '/w/b'");
+        assert_eq!(add_dirs("", &d), "");
     }
 
     #[test]

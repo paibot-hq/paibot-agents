@@ -79,7 +79,6 @@ fn main() -> Result<()> {
             cfg.workspaces.insert(0, t);
         }
     }
-    let open_picker = workspace.is_some();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -97,7 +96,7 @@ fn main() -> Result<()> {
         options,
         Box::new(move |cc| {
             setup(&cc.egui_ctx);
-            Ok(Box::new(app::PaispaceApp::new(cc, cfg, cfg_err, dir, start, open_picker)))
+            Ok(Box::new(app::PaispaceApp::new(cc, cfg, cfg_err, dir, start, workspace)))
         }),
     )
     .map_err(|e| anyhow::anyhow!("ウィンドウを開けませんでした: {e}"))

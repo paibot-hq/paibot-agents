@@ -129,6 +129,36 @@ pub struct Diff {
 
 const MAX_LINES: usize = 50_000;
 
+/// ワークスペースの複数のフォルダの差分をまとめる。2つ目以降のフォルダのファイルは絶対パスで持つ
+pub fn diff_multi(roots: &[PathBuf]) -> Diff {
+    if roots.len() <= 1 {
+        return diff(roots.first().map(|p| p.as_path()).unwrap_or(Path::new(".")));
+    }
+    let mut all = Diff { status: Vec::new(), lines: Vec::new(), error: None };
+    for (i, r) in roots.iter().enumerate() {
+        let name = r.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let d = diff(r);
+        if let Some(e) = d.error {
+            all.status.push(format!("   {name}: {e}"));
+            continue;
+        }
+        all.status.extend(d.status.into_iter().map(|l| {
+            let (code, path) = l.split_at(l.len().min(3));
+            format!("{code}{name}/{path}")
+        }));
+        for mut l in d.lines {
+            if i > 0 {
+                l.file = r.join(&l.file).to_string_lossy().into_owned();
+            }
+            if l.kind == Kind::File {
+                l.text = format!("{name}/{}", l.text);
+            }
+            all.lines.push(l);
+        }
+    }
+    all
+}
+
 /// 状態と、コミットしていない差分すべて
 pub fn diff(dir: &Path) -> Diff {
     let status = match git(dir, &["status", "--short"]) {

@@ -213,22 +213,6 @@ pub fn recent(limit: usize) -> Vec<Recent> {
     out
 }
 
-/// フォルダたちの共通の親（ホームや / になるときは None）
-pub fn common_parent(folders: &[PathBuf]) -> Option<PathBuf> {
-    let first = folders.first()?;
-    let mut base = first.clone();
-    for f in &folders[1..] {
-        while !f.starts_with(&base) {
-            base = base.parent()?.to_path_buf();
-        }
-    }
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    if base == Path::new("/") || base == home || base.components().count() <= 2 {
-        return None;
-    }
-    Some(base)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,11 +233,5 @@ mod tests {
     fn uri() {
         assert_eq!(uri_to_path("file:///Users/x/%E6%97%A5%E6%9C%AC"), Some(PathBuf::from("/Users/x/日本")));
         assert_eq!(uri_to_path("vscode-remote://ssh/x"), None);
-    }
-
-    #[test]
-    fn parent() {
-        let f = vec![PathBuf::from("/Volumes/SSD/work/a"), PathBuf::from("/Volumes/SSD/work/b/c")];
-        assert_eq!(common_parent(&f), Some(PathBuf::from("/Volumes/SSD/work")));
     }
 }

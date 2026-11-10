@@ -26,7 +26,8 @@ pub struct Picker {
 pub enum Outcome {
     Keep,
     Cancel,
-    Start { dir: String, agent: usize, branch: String },
+    /// roots が空でなければワークスペース（そのフォルダだけを見せる）
+    Start { dir: String, agent: usize, branch: String, roots: Vec<PathBuf>, name: Option<String> },
 }
 
 impl Picker {
@@ -123,7 +124,7 @@ impl Picker {
         }
 
         let mut out = Outcome::Keep;
-        let mut start_dir: Option<String> = None;
+        let mut start_dir: Option<Project> = None;
         let mut open_ws = ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::O));
         let screen = ctx.screen_rect();
         let modal = egui::Modal::new(Id::new("picker")).show(ctx, |ui| {
@@ -208,7 +209,13 @@ impl Picker {
                     let inner = Frame::new().fill(fill).corner_radius(7).inner_margin(Margin::symmetric(10, 7)).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            let g = if p.group.starts_with("VSCode") { crate::ui::icon::CODE } else { crate::ui::icon::FOLDER_SIMPLE };
+                            let g = if !p.roots.is_empty() {
+                                crate::ui::icon::STACK
+                            } else if p.group.starts_with("VSCode") {
+                                crate::ui::icon::CODE
+                            } else {
+                                crate::ui::icon::FOLDER_SIMPLE
+                            };
                             ui.label(RichText::new(g).size(14.0).color(if on { ACCENT } else { FAINT }));
                             ui.label(RichText::new(&p.name).size(13.5).color(TEXT));
                             if p.git {
@@ -227,17 +234,17 @@ impl Picker {
                         self.hi = i;
                     }
                     if resp.double_clicked() {
-                        start_dir = Some(p.path.clone());
+                        start_dir = Some(p.clone());
                     }
                 }
             });
             self.scroll_to_hi = false;
-            let chosen = list.get(hi).map(|p| (p.path.clone(), p.git));
+            let chosen = list.get(hi).cloned();
 
             ui.add_space(10.0);
             ui.separator();
             ui.add_space(6.0);
-            let git = chosen.as_ref().is_some_and(|c| c.1);
+            let git = chosen.as_ref().is_some_and(|c| c.git);
             ui.horizontal(|ui| {
                 ui.add_enabled(git, egui::Checkbox::new(&mut self.worktree, "新しいブランチ（worktree）で始める"));
                 if self.worktree && git {
@@ -257,15 +264,15 @@ impl Picker {
                     .corner_radius(7.0)
                     .fill(ACCENT.gamma_multiply(0.55));
                 if ui.add_enabled(can, start).clicked() {
-                    start_dir = chosen.as_ref().map(|c| c.0.clone());
+                    start_dir = chosen.clone();
                 }
                 if ui.button(format!("{}  ワークスペースを開く…", crate::ui::icon::CODE)).on_hover_text(".code-workspace を選ぶ  ⌘O").clicked() {
                     open_ws = true;
                 }
                 if ui.button("フォルダを選ぶ…").clicked() {
-                    let base = chosen.as_ref().map(|c| expand(&c.0)).unwrap_or_else(|| expand("~"));
+                    let base = chosen.as_ref().map(|c| expand(&c.path)).unwrap_or_else(|| expand("~"));
                     if let Some(p) = rfd::FileDialog::new().set_directory(base).pick_folder() {
-                        start_dir = Some(tilde(&p));
+                        start_dir = projects::folder(&p);
                     }
                 }
                 if ui.button("やめる").clicked() {
@@ -273,7 +280,7 @@ impl Picker {
                 }
             });
             if enter && start_dir.is_none() {
-                start_dir = chosen.map(|c| c.0);
+                start_dir = chosen;
             }
         });
         if open_ws {
@@ -283,12 +290,16 @@ impl Picker {
         if modal.should_close() {
             return Outcome::Cancel;
         }
-        if let Some(dir) = start_dir {
+        if let Some(p) = start_dir {
+            if !p.roots.is_empty() {
+                let name = p.name.trim_end_matches("（ワークスペース）").to_string();
+                return Outcome::Start { dir: p.path, agent: self.agent, branch: String::new(), roots: p.roots, name: Some(name) };
+            }
             if self.worktree && self.branch.trim().is_empty() {
                 return Outcome::Keep;
             }
             let branch = if self.worktree { self.branch.trim().to_string() } else { String::new() };
-            return Outcome::Start { dir, agent: self.agent, branch };
+            return Outcome::Start { dir: p.path, agent: self.agent, branch, roots: Vec::new(), name: None };
         }
         out
     }

@@ -51,8 +51,8 @@ struct Workspace {
 }
 
 impl Workspace {
-    fn new(cwd: PathBuf) -> Self {
-        Self { tree: FilePanel::new(cwd), docs: Vec::new(), active: None, search: Search::default() }
+    fn for_session(s: &Session) -> Self {
+        Self { tree: FilePanel::new(s.view_roots(), s.ws_title()), docs: Vec::new(), active: None, search: Search::default() }
     }
 
     fn open(&mut self, path: PathBuf, line: Option<usize>) {
@@ -111,7 +111,7 @@ enum TabAct {
 }
 
 struct DiffPanel {
-    cwd: PathBuf,
+    roots: Vec<PathBuf>,
     diff: git::Diff,
 }
 
@@ -173,7 +173,7 @@ impl PaispaceApp {
         cfg_err: Option<String>,
         dir: PathBuf,
         start: Option<String>,
-        open_picker: bool,
+        workspace: Option<PathBuf>,
     ) -> Self {
         let ctx = cc.egui_ctx.clone();
         let wake: Wake = Arc::new(move || ctx.request_repaint());
@@ -181,7 +181,7 @@ impl PaispaceApp {
         let git_info = Arc::new(Mutex::new(HashMap::new()));
         git::spawn_watcher(git_dirs.clone(), git_info.clone(), wake.clone());
         let mut recent = config::load_recent();
-        if recent.is_empty() {
+        if recent.is_empty() && workspace.is_none() {
             recent.push(tilde(&dir));
         }
         let mut app = Self {
@@ -221,15 +221,30 @@ impl PaispaceApp {
         if let Some(name) = start {
             match app.cfg.agents.iter().position(|a| a.name == name) {
                 Some(agent) => {
-                    if let Err(e) = app.create(&tilde(&dir), agent, "") {
+                    if let Err(e) = app.create(&tilde(&dir), agent, "", Vec::new(), None) {
                         app.flash(format!("{e:#}"));
                     }
                 }
                 None => app.flash(format!("エージェント「{name}」は設定にありません")),
             }
         }
-        if open_picker {
+        // ワークスペースを指定して開いたら、その項目を先頭で選んだ状態にする
+        if let Some(f) = workspace {
             app.open_new();
+            if let Some(p) = app.picker.as_mut() {
+                p.open_workspace(f);
+                p.opened_workspace = None;
+            }
+        }
+        // 確認用: ワークスペースのセッションを1つ始める
+        if let (Ok(f), true) = (std::env::var("PAISPACE_SHOT_START_WS"), app.shot.is_some()) {
+            if let Some(p) = crate::projects::workspace_projects(std::path::Path::new(&f)).into_iter().find(|p| !p.roots.is_empty()) {
+                let agent = app.cfg.default_agent_index();
+                let name = p.name.trim_end_matches("（ワークスペース）").to_string();
+                if let Err(e) = app.create(&p.path, agent, "", p.roots, Some(name)) {
+                    app.flash(format!("{e:#}"));
+                }
+            }
         }
         match shot_ui.as_str() {
             "resume" => app.apply(Action::ResumeAll),
@@ -249,20 +264,20 @@ impl PaispaceApp {
                 if shot_ui == "ask" {
                     if let Some(w) = app.cur_ws() {
                         if let Some(d) = w.active.map(|i| &w.docs[i]) {
-                            let rel = d.path.strip_prefix(&w.tree.root).unwrap_or(&d.path).to_string_lossy().into_owned();
+                            let rel = crate::util::rel_for_agent(&w.tree.root, &d.path);
                             app.ask = Some(Ask { rel, lines: Some((30, 42)), comment: "ここ、もっと短く書ける？".into(), first: true });
                         }
                     }
                 }
                 if shot_ui == "quick" {
-                    app.quick = Some(QuickOpen::new(app.sessions[0].cwd.clone()));
+                    app.quick = Some(QuickOpen::new(app.sessions[0].view_roots()));
                 }
                 if shot_ui == "search" {
                     app.side = Some(Side::Search);
                     let q = std::env::var("PAISPACE_SHOT_QUERY").unwrap_or_else(|_| "fn ".into());
-                    let cwd = app.sessions[0].cwd.clone();
+                    let roots = app.sessions[0].view_roots();
                     if let Some(w) = app.cur_ws() {
-                        w.search.set_and_run(&q, &cwd);
+                        w.search.set_and_run(&q, &roots);
                     }
                 }
             }
@@ -281,8 +296,9 @@ impl PaispaceApp {
 
     /// 今のセッションのワークスペース（なければ作る）
     fn cur_ws(&mut self) -> Option<&mut Workspace> {
-        let cwd = self.sessions.get(self.sel)?.cwd.clone();
-        Some(self.ws.entry(cwd.clone()).or_insert_with(|| Workspace::new(cwd)))
+        let i = self.sel;
+        let cwd = self.sessions.get(i)?.cwd.clone();
+        Some(self.ws.entry(cwd).or_insert_with(|| Workspace::for_session(&self.sessions[i])))
     }
 
     fn dirty_docs(&self) -> usize {
@@ -294,7 +310,7 @@ impl PaispaceApp {
         let Some(w) = self.cur_ws() else { return };
         let Some(i) = w.active else { return };
         let d = &w.docs[i];
-        let rel = d.path.strip_prefix(&w.tree.root).unwrap_or(&d.path).to_string_lossy().into_owned();
+        let rel = crate::util::rel_for_agent(&w.tree.root, &d.path);
         let lines = d.selection;
         self.ask = Some(Ask { rel, lines, comment: String::new(), first: true });
     }
@@ -334,12 +350,20 @@ impl PaispaceApp {
 
     fn open_diff(&mut self, i: usize) {
         if let Some(s) = self.sessions.get(i) {
-            self.diff = Some(DiffPanel { cwd: s.cwd.clone(), diff: git::diff(&s.cwd) });
+            let roots = s.view_roots();
+            self.diff = Some(DiffPanel { diff: git::diff_multi(&roots), roots });
         }
     }
 
-    fn create(&mut self, dir: &str, agent: usize, branch: &str) -> Result<()> {
+    fn create(&mut self, dir: &str, agent: usize, branch: &str, roots: Vec<PathBuf>, name: Option<String>) -> Result<()> {
         let Some(agent) = self.cfg.agents.get(agent).cloned() else { bail!("エージェントがありません") };
+        if !roots.is_empty() {
+            // ワークスペース: 1つ目のフォルダで起動し、残りはエージェントに足す
+            let roots: Vec<PathBuf> = roots.iter().filter_map(|r| std::fs::canonicalize(r).ok()).filter(|r| r.is_dir()).collect();
+            let Some(first) = roots.first().cloned() else { bail!("ワークスペースのフォルダが見つかりません") };
+            let name = name.unwrap_or_else(|| first.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
+            return self.spawn(name, &agent, first, None, roots);
+        }
         let dir = expand(dir);
         if !dir.is_dir() {
             bail!("フォルダがありません: {}", dir.display());
@@ -357,20 +381,22 @@ impl PaispaceApp {
         self.recent.insert(0, d);
         self.recent.truncate(8);
         config::save_recent(&self.recent);
-        self.spawn(name, &agent, cwd, None)
+        self.spawn(name, &agent, cwd, None, Vec::new())
     }
 
     /// エージェントを起動して一覧に加える。saved があればその続きから
-    fn spawn(&mut self, name: String, agent: &Agent, cwd: PathBuf, saved: Option<&Saved>) -> Result<()> {
+    fn spawn(&mut self, name: String, agent: &Agent, cwd: PathBuf, saved: Option<&Saved>, roots: Vec<PathBuf>) -> Result<()> {
         let base = agent.cmd.clone();
         let resumed = saved
             .filter(|s| s.resumable())
             .and_then(|s| s.resume_id.as_deref().and_then(|id| resume::resume_cmd(&base, id).map(|c| (c, Some(id.to_string())))));
         let (cmd, id) = resumed.unwrap_or_else(|| resume::start_cmd(&base));
+        let cmd = if roots.len() > 1 { resume::add_dirs(&cmd, &roots[1..]) } else { cmd };
         let run = Agent { name: agent.name.clone(), cmd };
         let mut s = Session::spawn(name, &run, cwd.clone(), self.term.size, self.cfg.scrollback, self.wake.clone())?;
         s.base_cmd = base;
         s.resume_id = id;
+        s.roots = roots;
         self.sessions.push(s);
         self.sel = self.sessions.len() - 1;
         self.term.reset();
@@ -379,7 +405,8 @@ impl PaispaceApp {
             self.open_diff(self.sel);
         }
         if let Some(saved) = saved.filter(|s| !s.tabs.is_empty()) {
-            let w = self.ws.entry(cwd.clone()).or_insert_with(|| Workspace::new(cwd));
+            let i = self.sessions.len() - 1;
+            let w = self.ws.entry(cwd).or_insert_with(|| Workspace::for_session(&self.sessions[i]));
             for t in &saved.tabs {
                 if t.is_file() && !w.docs.iter().any(|d| d.path == *t) {
                     w.docs.push(Doc::open(t.clone()));
@@ -402,7 +429,7 @@ impl PaispaceApp {
             .find(|a| a.name == saved.agent)
             .cloned()
             .unwrap_or_else(|| Agent { name: saved.agent.clone(), cmd: saved.cmd.clone() });
-        if let Err(e) = self.spawn(saved.name.clone(), &agent, saved.cwd.clone(), Some(&saved)) {
+        if let Err(e) = self.spawn(saved.name.clone(), &agent, saved.cwd.clone(), Some(&saved), saved.roots.clone()) {
             self.flash(format!("{} を再開できませんでした: {e:#}", saved.name));
             self.dormant.insert(i, saved);
         }
@@ -432,6 +459,7 @@ impl PaispaceApp {
                 cwd: s.cwd.clone(),
                 resume_id: s.resume_id.clone(),
                 tabs: self.ws.get(&s.cwd).map(|w| w.docs.iter().map(|d| d.path.clone()).collect()).unwrap_or_default(),
+                roots: s.roots.clone(),
             })
             .collect();
         list.extend(self.dormant.iter().cloned());
@@ -602,7 +630,7 @@ impl PaispaceApp {
             self.save_active();
         }
         if take(Key::P) && has {
-            self.quick = Some(QuickOpen::new(self.sessions[self.sel].cwd.clone()));
+            self.quick = Some(QuickOpen::new(self.sessions[self.sel].view_roots()));
         }
         if take(Key::L) && has {
             self.ask_active();
@@ -872,7 +900,7 @@ impl PaispaceApp {
         let mut tab_act = None;
         let i = self.sel;
         let cwd = self.sessions[i].cwd.clone();
-        let w = self.ws.entry(cwd.clone()).or_insert_with(|| Workspace::new(cwd.clone()));
+        let w = self.ws.entry(cwd.clone()).or_insert_with(|| Workspace::for_session(&self.sessions[i]));
         let s = &self.sessions[i];
         let branch = self.git_info.lock().unwrap().get(&s.cwd).and_then(|g| g.branch.clone()).or_else(|| s.branch.clone());
         let bar = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), 38.0));
@@ -992,8 +1020,7 @@ impl PaispaceApp {
         if close {
             self.side = None;
         } else if reload {
-            let cwd = d.cwd.clone();
-            d.diff = git::diff(&cwd);
+            d.diff = git::diff_multi(&d.roots);
         }
     }
 
@@ -1013,8 +1040,8 @@ impl PaispaceApp {
             match shown {
                 picker::Outcome::Keep => self.picker = Some(p),
                 picker::Outcome::Cancel => {}
-                picker::Outcome::Start { dir, agent, branch } => {
-                    if let Err(e) = self.create(&dir, agent, &branch) {
+                picker::Outcome::Start { dir, agent, branch, roots, name } => {
+                    if let Err(e) = self.create(&dir, agent, &branch, roots, name) {
                         self.flash(format!("{e:#}"));
                         self.picker = Some(p);
                     }
@@ -1256,7 +1283,9 @@ impl eframe::App for PaispaceApp {
                             });
                         });
                         ui.add_space(6.0);
-                        let w = self.ws.entry(cwd.clone()).or_insert_with(|| Workspace::new(cwd.clone()));
+                        let sel = self.sel;
+                        let roots = self.sessions[sel].view_roots();
+                        let w = self.ws.entry(cwd.clone()).or_insert_with(|| Workspace::for_session(&self.sessions[sel]));
                         if side == Side::Files {
                             let active = w.active.map(|i| w.docs[i].path.clone());
                             for a in w.tree.show(ui, active.as_deref()) {
@@ -1264,7 +1293,7 @@ impl eframe::App for PaispaceApp {
                                     FileAction::Open(p) => w.open(p, None),
                                 }
                             }
-                        } else if let Some((p, line)) = w.search.show(ui, &cwd) {
+                        } else if let Some((p, line)) = w.search.show(ui, &roots) {
                             w.open(p, Some(line));
                         }
                         if close {
@@ -1317,7 +1346,7 @@ impl eframe::App for PaispaceApp {
             let accept = !self.dialog_open();
             let sel = self.sel;
             let cwd = self.sessions[sel].cwd.clone();
-            let w = self.ws.entry(cwd.clone()).or_insert_with(|| Workspace::new(cwd.clone()));
+            let w = self.ws.entry(cwd.clone()).or_insert_with(|| Workspace::for_session(&self.sessions[sel]));
             if let Some(t) = tab_act {
                 match t {
                     TabAct::Select(a) => {
@@ -1369,7 +1398,7 @@ impl eframe::App for PaispaceApp {
                         }
                         DocAction::Ask => {
                             let d = &w.docs[di];
-                            let rel = d.path.strip_prefix(&cwd).unwrap_or(&d.path).to_string_lossy().into_owned();
+                            let rel = crate::util::rel_for_agent(&cwd, &d.path);
                             self.ask = Some(Ask { rel, lines: d.selection, comment: String::new(), first: true });
                         }
                         DocAction::OpenInEditor => {

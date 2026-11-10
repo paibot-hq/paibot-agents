@@ -21,7 +21,12 @@ struct Entry {
 }
 
 pub struct FilePanel {
+    /// 1つ目のフォルダ（エージェントが動いている場所）
     pub root: PathBuf,
+    /// 見せるフォルダ（ワークスペースなら複数）
+    pub roots: Vec<PathBuf>,
+    /// ワークスペースの名前（あれば見出しに出す）
+    pub title: Option<String>,
     expanded: HashSet<PathBuf>,
     children: HashMap<PathBuf, Vec<Entry>>,
     /// 変更のあるファイル → 状態の記号（M, A, D, ?）
@@ -43,10 +48,17 @@ pub struct AskHunk {
 }
 
 impl FilePanel {
-    pub fn new(root: PathBuf) -> Self {
+    pub fn new(roots: Vec<PathBuf>, title: Option<String>) -> Self {
+        let root = roots[0].clone();
+        let mut expanded = HashSet::new();
+        if roots.len() > 1 {
+            expanded.extend(roots.iter().cloned());
+        }
         let mut p = Self {
             root,
-            expanded: HashSet::new(),
+            roots,
+            title,
+            expanded,
             children: HashMap::new(),
             status: HashMap::new(),
             changed_dirs: HashSet::new(),
@@ -60,7 +72,7 @@ impl FilePanel {
 
     fn reload(&mut self) {
         let mut dirs: Vec<PathBuf> = self.expanded.iter().cloned().collect();
-        dirs.push(self.root.clone());
+        dirs.extend(self.roots.iter().cloned());
         self.children.clear();
         for d in dirs {
             self.load_dir(&d);
@@ -92,14 +104,20 @@ impl FilePanel {
     fn load_status(&mut self) {
         self.status.clear();
         self.changed_dirs.clear();
-        let Ok(top) = Command::new("git").arg("-C").arg(&self.root).args(["rev-parse", "--show-toplevel"]).output() else { return };
+        for r in self.roots.clone() {
+            self.load_status_of(&r);
+        }
+    }
+
+    fn load_status_of(&mut self, root: &Path) {
+        let Ok(top) = Command::new("git").arg("-C").arg(root).args(["rev-parse", "--show-toplevel"]).output() else { return };
         if !top.status.success() {
             return;
         }
         let top = PathBuf::from(String::from_utf8_lossy(&top.stdout).trim());
         let Ok(out) = Command::new("git")
             .arg("-C")
-            .arg(&self.root)
+            .arg(root)
             .args(["status", "--porcelain", "-z", "--untracked-files=all"])
             .output()
         else {
@@ -140,7 +158,7 @@ impl FilePanel {
     pub fn reveal(&mut self, path: &Path) {
         let mut p = path.parent();
         while let Some(d) = p {
-            if !d.starts_with(&self.root) || d == self.root {
+            if !self.roots.iter().any(|r| d.starts_with(r)) || self.roots.iter().any(|r| r == d) {
                 break;
             }
             if self.expanded.insert(d.to_path_buf()) {
@@ -156,7 +174,11 @@ impl FilePanel {
             self.reload();
         }
         ui.horizontal(|ui| {
-            ui.label(RichText::new(self.root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()).strong().color(TEXT));
+            let title = self.title.clone().unwrap_or_else(|| self.root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
+            if self.title.is_some() {
+                ui.label(RichText::new(ui::icon::CODE).size(13.0).color(ACCENT));
+            }
+            ui.label(RichText::new(title).strong().color(TEXT));
             if !self.status.is_empty() {
                 ui.label(RichText::new(format!("変更 {}", self.status.len())).size(11.0).color(WAITING));
             }
@@ -175,8 +197,43 @@ impl FilePanel {
         ScrollArea::vertical().id_salt("tree").auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.spacing_mut().interact_size.y = 18.0;
-            let root = self.root.clone();
-            self.tree(ui, &root, 0, active, &mut acts);
+            if self.roots.len() == 1 {
+                let root = self.root.clone();
+                self.tree(ui, &root, 0, active, &mut acts);
+            } else {
+                // ワークスペース: フォルダごとに1つずつ（VSCode と同じ）
+                for root in self.roots.clone() {
+                    let open = self.expanded.contains(&root);
+                    let name = root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                    let id = Id::new(("root", &root));
+                    let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
+                    let changed = self.changed_dirs.contains(&root) || self.status.keys().any(|p| p.starts_with(&root));
+                    let inner = Frame::new()
+                        .fill(if hovered { CARD_HOVER } else { Color32::TRANSPARENT })
+                        .corner_radius(5)
+                        .inner_margin(Margin { left: 4, right: 6, top: 6, bottom: 4 })
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 5.0;
+                                let caret = if open { ui::icon::CARET_DOWN } else { ui::icon::CARET_RIGHT };
+                                ui.add_sized(vec2(10.0, 14.0), Label::new(RichText::new(caret).size(10.0).color(FAINT)));
+                                ui.label(RichText::new(name.to_uppercase()).font(ui::bold(11.0)).color(if changed { WAITING } else { MUTED }));
+                            });
+                        });
+                    if ui.interact(inner.response.rect, id, Sense::click()).on_hover_text(root.to_string_lossy()).clicked() {
+                        if open {
+                            self.expanded.remove(&root);
+                        } else {
+                            self.expanded.insert(root.clone());
+                        }
+                    }
+                    if open {
+                        self.tree(ui, &root, 0, active, &mut acts);
+                    }
+                    ui.add_space(4.0);
+                }
+            }
         });
         acts
     }

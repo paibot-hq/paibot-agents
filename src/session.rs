@@ -37,6 +37,8 @@ pub struct Session {
     /// --session-id などを付ける前のコマンド
     pub base_cmd: String,
     pub started_at: std::time::SystemTime,
+    /// ワークスペースで始めたなら、そのフォルダたち（cwd は1つ目）
+    pub roots: Vec<PathBuf>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
@@ -130,11 +132,22 @@ impl Session {
             resume_id: None,
             base_cmd: agent.cmd.clone(),
             started_at: std::time::SystemTime::now(),
+            roots: Vec::new(),
             writer,
             master: pair.master,
             child,
             shared,
         })
+    }
+
+    /// ファイルのツリーなどで見せるフォルダ
+    pub fn view_roots(&self) -> Vec<PathBuf> {
+        if self.roots.len() > 1 { self.roots.clone() } else { vec![self.cwd.clone()] }
+    }
+
+    /// ワークスペースならその名前
+    pub fn ws_title(&self) -> Option<String> {
+        (self.roots.len() > 1).then(|| self.name.clone())
     }
 
     pub fn write(&mut self, bytes: &[u8]) {

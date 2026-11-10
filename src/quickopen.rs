@@ -10,8 +10,8 @@ use crate::theme::*;
 const SKIP: &[&str] = &[".git", "node_modules", "target", "dist", "build", ".next", ".venv", "venv", "__pycache__", ".turbo", ".cache"];
 
 pub struct QuickOpen {
-    root: PathBuf,
-    files: Vec<String>,
+    /// (表示する名前, 本当の場所)
+    files: Vec<(String, PathBuf)>,
     query: String,
     hi: usize,
     first: bool,
@@ -89,15 +89,25 @@ pub fn score(query: &str, path: &str) -> Option<i32> {
 }
 
 impl QuickOpen {
-    pub fn new(root: PathBuf) -> Self {
-        let files = list_files(&root);
-        Self { root, files, query: String::new(), hi: 0, first: true }
+    /// ワークスペースなら複数のフォルダから集め、頭にフォルダ名を付ける
+    pub fn new(roots: Vec<PathBuf>) -> Self {
+        let multi = roots.len() > 1;
+        let mut files = Vec::new();
+        for r in &roots {
+            let name = r.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            for f in list_files(r) {
+                let shown = if multi { format!("{name}/{f}") } else { f.clone() };
+                files.push((shown, r.join(f)));
+            }
+        }
+        Self { files, query: String::new(), hi: 0, first: true }
     }
 
     pub fn show(&mut self, ctx: &egui::Context) -> Outcome {
         let (down, up) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::ArrowDown), i.consume_key(Modifiers::NONE, Key::ArrowUp)));
         let enter = ctx.input(|i| i.key_pressed(Key::Enter));
-        let mut hits: Vec<(i32, &String)> = self.files.iter().filter_map(|f| score(&self.query, f).map(|s| (s, f))).collect();
+        let mut hits: Vec<(i32, &String, &PathBuf)> =
+            self.files.iter().filter_map(|(f, p)| score(&self.query, f).map(|s| (s, f, p))).collect();
         if !self.query.is_empty() {
             hits.sort_by(|a, b| b.0.cmp(&a.0));
         }
@@ -109,7 +119,7 @@ impl QuickOpen {
             self.hi = self.hi.saturating_sub(1);
         }
         let hi = self.hi.min(hits.len().saturating_sub(1));
-        let mut open: Option<String> = None;
+        let mut open: Option<PathBuf> = None;
         let screen = ctx.screen_rect();
         let modal = egui::Modal::new(Id::new("quickopen")).show(ctx, |ui| {
             ui.set_width(620.0_f32.min(screen.width() - 80.0));
@@ -132,7 +142,7 @@ impl QuickOpen {
                 if hits.is_empty() {
                     ui.label(RichText::new("見つかりません").color(MUTED));
                 }
-                for (i, (_, f)) in hits.iter().enumerate() {
+                for (i, (_, f, abs)) in hits.iter().enumerate() {
                     let (dir, name) = match f.rfind('/') {
                         Some(p) => (&f[..p], &f[p + 1..]),
                         None => ("", f.as_str()),
@@ -156,7 +166,7 @@ impl QuickOpen {
                         resp.scroll_to_me(None);
                     }
                     if resp.clicked() {
-                        open = Some((*f).clone());
+                        open = Some((*abs).clone());
                     }
                 }
             });
@@ -164,10 +174,10 @@ impl QuickOpen {
             ui.label(RichText::new(format!("{} ファイル · ↑↓ 選ぶ · Enter 開く · Esc やめる", self.files.len())).size(11.0).color(FAINT));
         });
         if enter && open.is_none() {
-            open = hits.get(hi).map(|(_, f)| (*f).clone());
+            open = hits.get(hi).map(|(_, _, p)| (*p).clone());
         }
-        if let Some(f) = open {
-            return Outcome::Open(self.root.join(f));
+        if let Some(p) = open {
+            return Outcome::Open(p);
         }
         if modal.should_close() {
             return Outcome::Cancel;

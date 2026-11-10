@@ -16,6 +16,8 @@ pub struct Project {
     pub git: bool,
     /// 一覧の見出し
     pub group: String,
+    /// ワークスペースそのものの項目なら、そのフォルダたち（ふつうは空）
+    pub roots: Vec<PathBuf>,
     modified: SystemTime,
 }
 
@@ -36,6 +38,7 @@ fn project(p: &Path, group: &str) -> Option<Project> {
         path: tilde(p),
         git: git_meta.is_some(),
         group: group.to_string(),
+        roots: Vec::new(),
         modified,
     })
 }
@@ -84,8 +87,12 @@ pub fn list(cfg: &Config, recent: &[String]) -> Vec<Project> {
     }
     for f in ws_files {
         for p in workspace_projects(&f) {
-            let path = expand(&p.path);
-            add(&mut out, &path, &p.group, Some(p.name));
+            if p.roots.is_empty() {
+                let path = expand(&p.path);
+                add(&mut out, &path, &p.group, Some(p.name));
+            } else {
+                out.push(p);
+            }
         }
     }
 
@@ -118,18 +125,26 @@ pub fn list(cfg: &Config, recent: &[String]) -> Vec<Project> {
     out
 }
 
-/// .code-workspace のフォルダ（複数なら共通の親を「（全体）」として先頭に）
+/// 選んだフォルダ1つを項目にする
+pub fn folder(p: &Path) -> Option<Project> {
+    project(p, "")
+}
+
+/// .code-workspace のフォルダ（複数なら、それらだけを見せる「（ワークスペース）」を先頭に）
 pub fn workspace_projects(file: &Path) -> Vec<Project> {
     let Some(ws) = vscode::parse_workspace(file) else { return Vec::new() };
     let group = format!("VSCode ワークスペース: {}", ws.name);
     let mut v = Vec::new();
     if ws.folders.len() > 1 {
-        if let Some(parent) = vscode::common_parent(&ws.folders) {
-            if let Some(mut p) = project(&parent, &group) {
-                p.name = format!("{}（全体）", ws.name);
-                v.push(p);
-            }
-        }
+        // ワークスペースのフォルダだけを見せるセッション（親フォルダ全体ではない）
+        v.push(Project {
+            name: format!("{}（ワークスペース）", ws.name),
+            path: tilde(file),
+            git: false,
+            group: group.clone(),
+            roots: ws.folders.clone(),
+            modified: SystemTime::now(),
+        });
     }
     v.extend(ws.folders.iter().filter_map(|d| project(d, &group)));
     v
