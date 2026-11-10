@@ -198,7 +198,7 @@ pub fn show(ui: &mut Ui, s: &mut Session, st: &mut TermState, accept_input: bool
         painter.line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.5, ACCENT));
     }
     if scrolled > 0 {
-        let label = format!("↑ {scrolled} 行前  ・ 入力すると戻ります");
+        let label = lf!("↑ {scrolled} 行前  ・ 入力すると戻ります", "↑ {scrolled} lines up  ·  type to jump back");
         let g = painter.layout_no_wrap(label, FontId::proportional(12.0), Color32::BLACK);
         let r = Rect::from_min_size(pos2(outer.right() - g.size().x - 24.0, outer.top() + 8.0), g.size() + vec2(12.0, 6.0));
         painter.rect_filled(r, 6.0, WAITING);

@@ -34,6 +34,7 @@ pub struct Setup {
     font_size: f32,
     workspaces: Vec<String>,
     vscode_recent: bool,
+    language: String,
     found_ws: Vec<(String, usize)>,
     base: Config,
     detected: Arc<Mutex<Option<Detected>>>,
@@ -76,6 +77,7 @@ impl Setup {
             editors: Vec::new(),
             notify: cfg.notify,
             workspaces: cfg.workspaces.clone(),
+            language: cfg.language.clone(),
             vscode_recent: cfg.vscode_recent,
             found_ws: Vec::new(),
             font_size: cfg.font_size,
@@ -125,24 +127,34 @@ impl Setup {
         let screen = ctx.screen_rect();
         let modal = egui::Modal::new(Id::new("setup")).show(ctx, |ui| {
             ui.set_width(640.0_f32.min(screen.width() - 80.0));
-            let title = if self.first_run { "はじめに" } else { "設定" };
+            let title = if self.first_run { l!("はじめに", "Welcome") } else { l!("設定", "Settings") };
             ui.label(RichText::new(title).font(crate::ui::bold(19.0)).color(TEXT));
             if self.first_run {
                 ui.add_space(4.0);
-                ui.label(RichText::new("ここで決めたことは、あとから ⌘, でいつでも変えられます。").color(MUTED));
+                ui.label(RichText::new(l!("ここで決めたことは、あとから ⌘, でいつでも変えられます。", "You can change all of this later with ⌘,.")).color(MUTED));
             }
             ui.add_space(14.0);
 
             ScrollArea::vertical().max_height((screen.height() - 260.0).max(240.0)).auto_shrink([false, true]).show(ui, |ui| {
-                section(ui, "プロジェクトの置き場", "この中のフォルダが、新しいセッションの一覧に並びます。");
+                section(ui, l!("言語", "Language"), "");
+                ui.horizontal(|ui| {
+                    for (v, label) in [("auto", l!("自動（macOS に合わせる）", "Auto (follow macOS)")), ("ja", "日本語"), ("en", "English")] {
+                        if ui.selectable_label(self.language == v, label).clicked() {
+                            self.language = v.to_string();
+                            crate::i18n::apply(v);
+                        }
+                    }
+                });
+                ui.add_space(18.0);
+                section(ui, l!("プロジェクトの置き場", "Projects folders"), l!("この中のフォルダが、新しいセッションの一覧に並びます。", "Folders inside these are listed when you start a new session."));
                 let mut remove = None;
                 for (i, r) in self.roots.iter().enumerate() {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(r).font(egui::FontId::monospace(13.0)).color(TEXT));
                         let n = std::fs::read_dir(expand(r)).map(|rd| rd.flatten().filter(|e| e.path().is_dir()).count()).unwrap_or(0);
-                        ui.label(RichText::new(format!("{n} フォルダ")).size(11.0).color(FAINT));
+                        ui.label(RichText::new(lf!("{n} フォルダ", "{n} folders")).size(11.0).color(FAINT));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.small_button("外す").clicked() {
+                            if ui.small_button(l!("外す", "Remove")).clicked() {
                                 remove = Some(i);
                             }
                         });
@@ -152,7 +164,7 @@ impl Setup {
                     self.roots.remove(i);
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("フォルダを足す…").clicked() {
+                    if ui.button(l!("フォルダを足す…", "Add folder…")).clicked() {
                         if let Some(p) = rfd::FileDialog::new().set_directory(expand("~")).pick_folder() {
                             let t = tilde(&p);
                             if !self.roots.contains(&t) {
@@ -160,7 +172,7 @@ impl Setup {
                             }
                         }
                     }
-                    let r = ui.add(TextEdit::singleline(&mut self.root_input).hint_text("または場所を入力して Enter").desired_width(260.0));
+                    let r = ui.add(TextEdit::singleline(&mut self.root_input).hint_text(l!("または場所を入力して Enter", "or type a path and press Enter")).desired_width(260.0));
                     if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && expand(&self.root_input).is_dir() {
                         let t = tilde(&expand(&self.root_input));
                         if !self.roots.contains(&t) {
@@ -172,9 +184,9 @@ impl Setup {
                 let sug: Vec<String> = self.suggestions.iter().filter(|s| !self.roots.contains(s)).cloned().collect();
                 if !sug.is_empty() {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("候補:").size(12.0).color(FAINT));
+                        ui.label(RichText::new(l!("候補:", "Suggestions:")).size(12.0).color(FAINT));
                         for s in sug {
-                            if ui.small_button(format!("＋ {s}")).clicked() {
+                            if ui.small_button(lf!("＋ {s}", "+ {s}")).clicked() {
                                 self.roots.push(s);
                             }
                         }
@@ -182,11 +194,11 @@ impl Setup {
                 }
 
                 ui.add_space(18.0);
-                section(ui, "エージェント", "使うものに印を付けます。◉ が新しいセッションで最初に選ばれます。");
+                section(ui, l!("エージェント", "Agents"), l!("使うものに印を付けます。◉ が新しいセッションで最初に選ばれます。", "Check the ones you use. ◉ is selected first for new sessions."));
                 if !self.applied_detection {
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new().size(12.0));
-                        ui.label(RichText::new("入っているものを探しています…").size(12.0).color(MUTED));
+                        ui.label(RichText::new(l!("入っているものを探しています…", "Looking for installed agents…")).size(12.0).color(MUTED));
                     });
                 }
                 let mut remove = None;
@@ -201,15 +213,15 @@ impl Setup {
                             TextEdit::singleline(&mut r.agent.cmd)
                                 .desired_width(220.0)
                                 .font(egui::FontId::monospace(12.0))
-                                .hint_text("空ならシェル"),
+                                .hint_text(l!("空ならシェル", "empty = shell")),
                         );
                         match r.found {
-                            Some(true) => ui.label(RichText::new("見つかった").size(11.0).color(OK)),
-                            Some(false) => ui.label(RichText::new("見つからない").size(11.0).color(FAINT)),
+                            Some(true) => ui.label(RichText::new(l!("見つかった", "found")).size(11.0).color(OK)),
+                            Some(false) => ui.label(RichText::new(l!("見つからない", "not found")).size(11.0).color(FAINT)),
                             None => ui.label(""),
                         };
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.small_button("消す").clicked() {
+                            if ui.small_button(l!("消す", "Delete")).clicked() {
                                 remove = Some(i);
                             }
                         });
@@ -218,13 +230,13 @@ impl Setup {
                 if let Some(i) = remove {
                     self.rows.remove(i);
                 }
-                if ui.button("＋ エージェントを足す").clicked() {
+                if ui.button(l!("＋ エージェントを足す", "+ Add agent")).clicked() {
                     self.rows.push(AgentRow { on: true, agent: Agent { name: "new".into(), cmd: String::new() }, found: None });
                 }
 
                 ui.add_space(18.0);
-                section(ui, "VSCode", "VSCode のワークスペースや、最近開いたフォルダも新しいセッションの一覧に並べます（読むだけです）。");
-                ui.checkbox(&mut self.vscode_recent, "VSCode・Cursor などで最近開いたフォルダとワークスペースを並べる");
+                section(ui, "VSCode", l!("VSCode のワークスペースや、最近開いたフォルダも新しいセッションの一覧に並べます（読むだけです）。", "Also list VSCode workspaces and recently opened folders when starting a session (read only)."));
+                ui.checkbox(&mut self.vscode_recent, l!("VSCode・Cursor などで最近開いたフォルダとワークスペースを並べる", "List folders and workspaces recently opened in VSCode, Cursor and similar"));
                 if self.found_ws.is_empty() {
                     let mut dirs = Vec::new();
                     for r in &self.roots {
@@ -245,7 +257,7 @@ impl Setup {
                 for (f, n) in self.found_ws.iter().filter(|(f, _)| !f.is_empty()) {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(f).font(egui::FontId::monospace(12.0)).color(TEXT));
-                        ui.label(RichText::new(format!("{n} フォルダ · 置き場から自動で見つけた")).size(11.0).color(FAINT));
+                        ui.label(RichText::new(lf!("{n} フォルダ · 置き場から自動で見つけた", "{n} folders · found in your projects folders")).size(11.0).color(FAINT));
                     });
                 }
                 let mut remove = None;
@@ -253,7 +265,7 @@ impl Setup {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(w).font(egui::FontId::monospace(12.0)).color(TEXT));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.small_button("外す").clicked() {
+                            if ui.small_button(l!("外す", "Remove")).clicked() {
                                 remove = Some(i);
                             }
                         });
@@ -262,8 +274,8 @@ impl Setup {
                 if let Some(i) = remove {
                     self.workspaces.remove(i);
                 }
-                if ui.button("ワークスペースを足す…").clicked() {
-                    if let Some(p) = rfd::FileDialog::new().add_filter("VSCode ワークスペース", &["code-workspace"]).set_directory(expand("~")).pick_file() {
+                if ui.button(l!("ワークスペースを足す…", "Add workspace…")).clicked() {
+                    if let Some(p) = rfd::FileDialog::new().add_filter(l!("VSCode ワークスペース", "VSCode workspace"), &["code-workspace"]).set_directory(expand("~")).pick_file() {
                         let t = tilde(&p);
                         if !self.workspaces.contains(&t) {
                             self.workspaces.push(t);
@@ -272,7 +284,7 @@ impl Setup {
                 }
 
                 ui.add_space(18.0);
-                section(ui, "エディタ", "「エディタで開く」に使うアプリ");
+                section(ui, l!("エディタ", "Editor"), l!("「エディタで開く」に使うアプリ", "App used for \"Open in editor\""));
                 let mut choices = self.editors.clone();
                 if !choices.contains(&self.editor) {
                     choices.insert(0, self.editor.clone());
@@ -284,17 +296,17 @@ impl Setup {
                 });
 
                 ui.add_space(18.0);
-                section(ui, "そのほか", "");
-                ui.checkbox(&mut self.notify, "エージェントの手が空いたら通知する");
+                section(ui, l!("そのほか", "Other"), "");
+                ui.checkbox(&mut self.notify, l!("エージェントの手が空いたら通知する", "Notify me when an agent is waiting"));
                 ui.horizontal(|ui| {
-                    ui.label("ターミナルの文字の大きさ");
+                    ui.label(l!("ターミナルの文字の大きさ", "Terminal font size"));
                     ui.add(egui::Slider::new(&mut self.font_size, 10.0..=20.0).step_by(1.0));
                 });
             });
 
             ui.add_space(14.0);
             ui.horizontal(|ui| {
-                let label = if self.first_run { "はじめる" } else { "保存" };
+                let label = if self.first_run { l!("はじめる", "Get started") } else { l!("保存", "Save") };
                 let ok = egui::Button::new(RichText::new(format!("{}  {label}", crate::ui::icon::CHECK)).size(13.5).color(egui::Color32::WHITE))
                     .min_size(vec2(110.0, 32.0))
                     .corner_radius(7.0)
@@ -303,11 +315,11 @@ impl Setup {
                 if ui.add_enabled(has_agent, ok).clicked() {
                     out = Outcome::Save(self.build());
                 }
-                if ui.button(if self.first_run { "あとで" } else { "やめる" }).clicked() {
+                if ui.button(if self.first_run { l!("あとで", "Later") } else { l!("やめる", "Cancel") }).clicked() {
                     out = Outcome::Cancel;
                 }
                 if !has_agent {
-                    ui.label(RichText::new("エージェントを1つ以上選んでください").size(12.0).color(WAITING));
+                    ui.label(RichText::new(l!("エージェントを1つ以上選んでください", "Choose at least one agent")).size(12.0).color(WAITING));
                 }
             });
         });
@@ -334,6 +346,7 @@ impl Setup {
         c.editor_app = self.editor.clone();
         c.notify = self.notify;
         c.workspaces = self.workspaces.clone();
+        c.language = self.language.clone();
         c.vscode_recent = self.vscode_recent;
         c.font_size = self.font_size;
         c

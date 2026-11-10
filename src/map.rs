@@ -119,9 +119,9 @@ pub enum Window {
 fn secs(d: Duration) -> String {
     let s = d.as_secs();
     match s {
-        0..60 => format!("{s}秒"),
-        60..3600 => format!("{}分{}秒", s / 60, s % 60),
-        _ => format!("{}時間{}分", s / 3600, s / 60 % 60),
+        0..60 => lf!("{s}秒", "{s}s"),
+        60..3600 => lf!("{}分{}秒", "{}m {}s", s / 60, s % 60),
+        _ => lf!("{}時間{}分", "{}h {}m", s / 3600, s / 60 % 60),
     }
 }
 
@@ -202,22 +202,22 @@ pub fn show(ui: &mut Ui, lanes: &[Lane], window: &mut Window, view: &mut View) -
     let called = all_kids(lanes).len();
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(ui::icon::TREE_STRUCTURE).size(15.0).color(ACCENT));
-        ui.label(egui::RichText::new("エージェントマップ").font(ui::bold(13.5)).color(TEXT));
+        ui.label(egui::RichText::new(l!("エージェントマップ", "Agent map")).font(ui::bold(13.5)).color(TEXT));
         if running > 0 {
-            ui.label(egui::RichText::new(format!("動作中 {running}")).size(11.0).color(ACCENT));
+            ui.label(egui::RichText::new(lf!("動作中 {running}", "{running} running")).size(11.0).color(ACCENT));
         }
-        ui.label(egui::RichText::new(format!("呼ばれた {called}")).size(11.0).color(FAINT));
+        ui.label(egui::RichText::new(lf!("呼ばれた {called}", "{called} called")).size(11.0).color(FAINT));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             if *view == View::Timeline {
-                for (w, label) in [(Window::Min5, "5分"), (Window::Min30, "30分"), (Window::All, "全部")] {
+                for (w, label) in [(Window::Min5, l!("5分", "5m")), (Window::Min30, l!("30分", "30m")), (Window::All, l!("全部", "All"))] {
                     if ui.selectable_label(*window == w, egui::RichText::new(label).size(11.0)).clicked() {
                         *window = w;
                     }
                 }
                 ui.add_space(10.0);
             }
-            for (v, g, label) in [(View::Timeline, ui::icon::CHART_BAR_HORIZONTAL, "時間"), (View::Graph, ui::icon::GRAPH, "グラフ")] {
+            for (v, g, label) in [(View::Timeline, ui::icon::CHART_BAR_HORIZONTAL, l!("時間", "Time")), (View::Graph, ui::icon::GRAPH, l!("グラフ", "Graph"))] {
                 if ui.selectable_label(*view == v, egui::RichText::new(format!("{g} {label}")).size(11.5)).clicked() {
                     *view = v;
                 }
@@ -232,10 +232,10 @@ pub fn show(ui: &mut Ui, lanes: &[Lane], window: &mut Window, view: &mut View) -
         ui.spacing_mut().item_spacing.x = 8.0;
         let w = ((ui.available_width() - 24.0) / 4.0).max(60.0);
         for (n, label, c) in [
-            (lanes.len(), "セッション", TEXT),
-            (called, "呼ばれた", SUB),
-            (running, "動作中", if running > 0 { ACCENT } else { FAINT }),
-            (tools, "道具", MUTED),
+            (lanes.len(), l!("セッション", "Sessions"), TEXT),
+            (called, l!("呼ばれた", "Called"), SUB),
+            (running, l!("動作中", "Running"), if running > 0 { ACCENT } else { FAINT }),
+            (tools, l!("道具", "Tools"), MUTED),
         ] {
             let (r, _) = ui.allocate_exact_size(vec2(w, 54.0), Sense::hover());
             let p = ui.painter();
@@ -243,7 +243,7 @@ pub fn show(ui: &mut Ui, lanes: &[Lane], window: &mut Window, view: &mut View) -
             p.rect_stroke(r, 10.0, Stroke::new(1.0, HAIRLINE), egui::StrokeKind::Inside);
             p.text(r.left_top() + vec2(12.0, 8.0), Align2::LEFT_TOP, label, FontId::proportional(10.5), FAINT);
             p.text(r.left_bottom() + vec2(12.0, -8.0), Align2::LEFT_BOTTOM, n.to_string(), ui::bold(22.0), c);
-            if label == "動作中" && n > 0 {
+            if label == l!("動作中", "Running") && n > 0 {
                 let pulse = 0.5 + 0.5 * ((t * 3.0).sin() as f32);
                 p.circle_filled(r.right_top() + vec2(-14.0, 14.0), 3.0 + pulse * 1.5, ACCENT.gamma_multiply(0.5 + 0.5 * pulse));
             }
@@ -254,7 +254,7 @@ pub fn show(ui: &mut Ui, lanes: &[Lane], window: &mut Window, view: &mut View) -
     // 凡例
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
-        for (c, name) in [(CLAUDE, "claude"), (CODEX, "codex"), (SUB, "子エージェント"), (OTHER, "そのほか")] {
+        for (c, name) in [(CLAUDE, "claude"), (CODEX, "codex"), (SUB, l!("子エージェント", "Subagent")), (OTHER, l!("そのほか", "Other"))] {
             let (r, _) = ui.allocate_exact_size(vec2(18.0, 10.0), Sense::hover());
             ui.painter().rect_filled(r.shrink2(vec2(0.0, 1.5)), 4.0, c.gamma_multiply(0.8));
             ui.label(egui::RichText::new(name).size(11.0).color(MUTED));
@@ -263,7 +263,7 @@ pub fn show(ui: &mut Ui, lanes: &[Lane], window: &mut Window, view: &mut View) -
     ui.add_space(10.0);
 
     if lanes.is_empty() {
-        ui.label(egui::RichText::new("セッションがありません").color(FAINT));
+        ui.label(egui::RichText::new(l!("セッションがありません", "No sessions")).color(FAINT));
         return None;
     }
     if *view == View::Graph {
@@ -307,7 +307,7 @@ pub fn show(ui: &mut Ui, lanes: &[Lane], window: &mut Window, view: &mut View) -
         while k <= span {
             let x = x1 - (k / span) * xw;
             p.line_segment([pos2(x, axis_y + 8.0), pos2(x, area.bottom())], Stroke::new(1.0, HAIRLINE.gamma_multiply(0.7)));
-            let label = if k == 0.0 { "今".to_string() } else { format!("−{}", secs(Duration::from_secs_f32(k))) };
+            let label = if k == 0.0 { l!("今", "now").to_string() } else { format!("−{}", secs(Duration::from_secs_f32(k))) };
             p.text(pos2(x, axis_y), Align2::CENTER_CENTER, label, FontId::proportional(10.0), FAINT);
             k += step;
         }
@@ -396,11 +396,11 @@ pub fn show(ui: &mut Ui, lanes: &[Lane], window: &mut Window, view: &mut View) -
                 if resp.hovered() {
                     p.rect_filled(hit, 4.0, Color32::WHITE.gamma_multiply(0.02));
                 }
-                let tip = format!(
-                    "{}\n\n頼まれたこと: {}\n\n{}",
+                let tip = lf!(
+                    "{}\n\n頼まれたこと: {}\n\n{}", "{}\n\nAsked to: {}\n\n{}",
                     kid.label,
                     clip(&kid.prompt, 300),
-                    if kid.last.is_empty() { String::new() } else { format!("答え: {}", clip(&kid.last, 300)) }
+                    if kid.last.is_empty() { String::new() } else { lf!("答え: {}", "Answer: {}", clip(&kid.last, 300)) }
                 );
                 if resp.on_hover_text(tip).clicked() {
                     clicked = Some(kid.id.clone());
@@ -418,11 +418,11 @@ pub fn show(ui: &mut Ui, lanes: &[Lane], window: &mut Window, view: &mut View) -
 
 fn state_mark(state: State) -> (&'static str, Color32, &'static str) {
     match state {
-        State::Running => (ui::icon::CIRCLE_NOTCH, ACCENT, "動作中"),
-        State::Waiting => (ui::icon::HAND, WAITING, "待っています"),
-        State::Quiet => (ui::icon::CIRCLE, FAINT, "静か"),
-        State::Done => (ui::icon::CHECK_CIRCLE, OK, "終わった"),
-        State::Stopped => (ui::icon::WARNING_CIRCLE, WAITING, "止まった"),
+        State::Running => (ui::icon::CIRCLE_NOTCH, ACCENT, l!("動作中", "Running")),
+        State::Waiting => (ui::icon::HAND, WAITING, l!("待っています", "Waiting")),
+        State::Quiet => (ui::icon::CIRCLE, FAINT, l!("静か", "Idle")),
+        State::Done => (ui::icon::CHECK_CIRCLE, OK, l!("終わった", "Done")),
+        State::Stopped => (ui::icon::WARNING_CIRCLE, WAITING, l!("止まった", "Stopped")),
     }
 }
 
@@ -560,17 +560,17 @@ fn graph(ui: &mut Ui, lanes: &[Lane], t: f64, now: SystemTime) -> Option<Click> 
             let resp = ui.interact(r, ui.id().with(("node", &kid.id)), Sense::click());
             let end = kid.end.unwrap_or(c.now);
             let dur = end.duration_since(kid.start).unwrap_or_default();
-            let mut foot = format!("{} 道具 {}  ·  {}", ui::icon::WRENCH, kid.tools, secs(dur));
+            let mut foot = lf!("{} 道具 {}  ·  {}", "{} {}  ·  {}", ui::icon::WRENCH, kid.tools, secs(dur));
             if !kid.kids.is_empty() {
-                foot.push_str(&format!("  ·  {} を呼んだ", kid.kids.len()));
+                foot.push_str(&lf!("  ·  {} を呼んだ", "  ·  called {}", kid.kids.len()));
             }
             node(&c.p, r, kid.color, kid.state, &kid.label, &kid.prompt, &foot, c.t + (salt * 7 + ki) as f64 * 0.31, false, resp.hovered());
-            let how = if kid.guessed { "\n\n（呼び出し元は推測：同じフォルダで、左の箱が動いている間に始まった）" } else { "" };
-            let tip = format!(
-                "{}\n\n頼まれたこと: {}\n\n{}{how}",
+            let how = if kid.guessed { l!("\n\n（呼び出し元は推測：同じフォルダで、左の箱が動いている間に始まった）", "\n\n(Caller is a guess: it started in the same folder while the box on the left was running)") } else { "" };
+            let tip = lf!(
+                "{}\n\n頼まれたこと: {}\n\n{}{how}", "{}\n\nAsked to: {}\n\n{}{how}",
                 kid.label,
                 clip(&kid.prompt, 300),
-                if kid.last.is_empty() { String::new() } else { format!("答え: {}", clip(&kid.last, 300)) }
+                if kid.last.is_empty() { String::new() } else { lf!("答え: {}", "Answer: {}", clip(&kid.last, 300)) }
             );
             if resp.on_hover_text(tip).clicked() {
                 *c.clicked = Some(Click::Kid(kid.id.clone()));
@@ -596,9 +596,9 @@ fn graph(ui: &mut Ui, lanes: &[Lane], t: f64, now: SystemTime) -> Option<Click> 
             let resp0 = ui.interact(r0, ui.id().with(("lane", li)), Sense::click());
             let age = now.duration_since(lane.start).unwrap_or_default();
             let n = lane.kids.len();
-            let foot = if n == 0 { secs(age) } else { format!("{n} を呼んだ · {}", secs(age)) };
+            let foot = if n == 0 { secs(age) } else { lf!("{n} を呼んだ · {}", "called {n} · {}", secs(age)) };
             node(&c.p, r0, lane.color, lane.state, &lane.name, &lane.agent, &foot, t + li as f64 * 0.4, false, resp0.hovered());
-            if resp0.on_hover_text("クリックでこのセッションへ").clicked() {
+            if resp0.on_hover_text(l!("クリックでこのセッションへ", "Click to open this session")).clicked() {
                 *c.clicked = Some(Click::Lane(li));
             }
             let inner = kids_h(&lane.kids, h, gap);

@@ -73,11 +73,11 @@ pub fn status_dot(ui: &mut Ui, s: &Session) -> Response {
 
 pub fn status_text(s: &Session) -> (&'static str, Color32) {
     match s.exit {
-        Some(0) => ("終了", OK),
-        Some(_) => ("エラーで終了", BAD),
-        None if s.attention => ("待っています", WAITING),
-        None if s.busy => ("動いています", ACCENT),
-        None => ("静か", MUTED),
+        Some(0) => (l!("終了", "Exited"), OK),
+        Some(_) => (l!("エラーで終了", "Exited with error"), BAD),
+        None if s.attention => (l!("待っています", "Waiting"), WAITING),
+        None if s.busy => (l!("動いています", "Running"), ACCENT),
+        None => (l!("静か", "Idle"), MUTED),
     }
 }
 

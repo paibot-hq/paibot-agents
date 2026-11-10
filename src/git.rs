@@ -25,7 +25,7 @@ pub fn current_branch(dir: &Path) -> Option<String> {
 /// <repo>/../<repo名>.worktrees/<ブランチ> にworktreeを用意する（あれば使い回す）
 pub fn ensure_worktree(dir: &Path, branch: &str) -> Result<PathBuf> {
     let root = git(dir, &["rev-parse", "--show-toplevel"])
-        .map_err(|_| anyhow::anyhow!("{} はgitリポジトリではありません", dir.display()))?;
+        .map_err(|_| anyhow::anyhow!("{}", lf!("{} はgitリポジトリではありません", "{} is not a git repository", dir.display())))?;
     let root = PathBuf::from(root.trim());
     let name = root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "repo".into());
     let base = root.parent().unwrap_or(&root).join(format!("{name}.worktrees"));

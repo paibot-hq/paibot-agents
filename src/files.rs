@@ -180,14 +180,14 @@ impl FilePanel {
             }
             ui.label(RichText::new(title).strong().color(TEXT));
             if !self.status.is_empty() {
-                ui.label(RichText::new(format!("変更 {}", self.status.len())).size(11.0).color(WAITING));
+                ui.label(RichText::new(lf!("変更 {}", "{} changed", self.status.len())).size(11.0).color(WAITING));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                if ui::icon_button(ui, ui::icon::ARROW_CLOCKWISE, "読み直す", false).clicked() {
+                if ui::icon_button(ui, ui::icon::ARROW_CLOCKWISE, l!("読み直す", "Reload"), false).clicked() {
                     self.reload();
                 }
-                let (g, tip) = if self.show_hidden { (ui::icon::EYE, "隠しファイルを隠す") } else { (ui::icon::EYE_SLASH, "隠しファイルも出す") };
+                let (g, tip) = if self.show_hidden { (ui::icon::EYE, l!("隠しファイルを隠す", "Hide hidden files")) } else { (ui::icon::EYE_SLASH, l!("隠しファイルも出す", "Show hidden files")) };
                 if ui::icon_button(ui, g, tip, false).clicked() {
                     self.show_hidden = !self.show_hidden;
                 }
@@ -330,7 +330,7 @@ pub fn diff_view(ui: &mut Ui, lines: &[DiffLine], id: &str) -> Option<AskHunk> {
                 ui.horizontal(|ui| {
                     ui.add(Label::new(text).extend());
                     if let Some(range) = l.range {
-                        if ui.small_button(RichText::new("聞く").size(11.0)).on_hover_text("このまとまりについてエージェントに聞く").clicked() {
+                        if ui.small_button(RichText::new(l!("聞く", "Ask")).size(11.0)).on_hover_text(l!("このまとまりについてエージェントに聞く", "Ask the agent about this hunk")).clicked() {
                             ask = Some(AskHunk { file: l.file.clone(), range });
                         }
                     }

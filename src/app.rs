@@ -133,8 +133,8 @@ struct Ask {
 impl Ask {
     fn text(&self) -> String {
         let place = match self.lines {
-            Some((a, b)) if a != b => format!("{} の {a}〜{b} 行目", self.rel),
-            Some((a, _)) => format!("{} の {a} 行目", self.rel),
+            Some((a, b)) if a != b => lf!("{} の {a}〜{b} 行目", "{} lines {a}–{b}", self.rel),
+            Some((a, _)) => lf!("{} の {a} 行目", "{} line {a}", self.rel),
             None => self.rel.clone(),
         };
         let c = self.comment.trim();
@@ -279,7 +279,7 @@ impl PaispaceApp {
                         app.flash(format!("{e:#}"));
                     }
                 }
-                None => app.flash(format!("エージェント「{name}」は設定にありません")),
+                None => app.flash(lf!("エージェント「{name}」は設定にありません", "Agent \"{name}\" is not in the settings")),
             }
         }
         // ワークスペースを指定して開いたら、その項目を先頭で選んだ状態にする
@@ -294,7 +294,7 @@ impl PaispaceApp {
         if let (Ok(f), true) = (std::env::var("PAISPACE_SHOT_START_WS"), app.shot.is_some()) {
             if let Some(p) = crate::projects::workspace_projects(std::path::Path::new(&f)).into_iter().find(|p| !p.roots.is_empty()) {
                 let agent = app.cfg.default_agent_index();
-                let name = p.name.trim_end_matches("（ワークスペース）").to_string();
+                let name = p.name.trim_end_matches(l!("（ワークスペース）", " (workspace)")).to_string();
                 if let Err(e) = app.create(&p.path, agent, "", p.roots, Some(name)) {
                     app.flash(format!("{e:#}"));
                 }
@@ -329,7 +329,7 @@ impl PaispaceApp {
                     if let Some(w) = app.cur_ws() {
                         if let Some(d) = w.active.map(|i| &w.docs[i]) {
                             let rel = crate::util::rel_for_agent(&w.tree.root, &d.path);
-                            app.ask = Some(Ask { rel, lines: Some((30, 42)), comment: "ここ、もっと短く書ける？".into(), first: true });
+                            app.ask = Some(Ask { rel, lines: Some((30, 42)), comment: l!("ここ、もっと短く書ける？", "Can this be shorter?").into(), first: true });
                         }
                     }
                 }
@@ -385,7 +385,7 @@ impl PaispaceApp {
         let r = w.docs[i].save();
         match r {
             Ok(()) => {}
-            Err(e) => self.flash(format!("保存できませんでした: {e}")),
+            Err(e) => self.flash(lf!("保存できませんでした: {e}", "Could not save: {e}")),
         }
     }
 
@@ -420,17 +420,17 @@ impl PaispaceApp {
     }
 
     fn create(&mut self, dir: &str, agent: usize, branch: &str, roots: Vec<PathBuf>, name: Option<String>) -> Result<()> {
-        let Some(agent) = self.cfg.agents.get(agent).cloned() else { bail!("エージェントがありません") };
+        let Some(agent) = self.cfg.agents.get(agent).cloned() else { bail!("{}", lf!("エージェントがありません", "No agent")) };
         if !roots.is_empty() {
             // ワークスペース: 1つ目のフォルダで起動し、残りはエージェントに足す
             let roots: Vec<PathBuf> = roots.iter().filter_map(|r| std::fs::canonicalize(r).ok()).filter(|r| r.is_dir()).collect();
-            let Some(first) = roots.first().cloned() else { bail!("ワークスペースのフォルダが見つかりません") };
+            let Some(first) = roots.first().cloned() else { bail!("{}", lf!("ワークスペースのフォルダが見つかりません", "None of the workspace folders were found")) };
             let name = name.unwrap_or_else(|| first.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
             return self.spawn(name, &agent, first, None, roots);
         }
         let dir = expand(dir);
         if !dir.is_dir() {
-            bail!("フォルダがありません: {}", dir.display());
+            bail!("{}", lf!("フォルダがありません: {}", "Folder not found: {}", dir.display()));
         }
         let dir = std::fs::canonicalize(&dir)?;
         let branch = branch.trim();
@@ -494,7 +494,7 @@ impl PaispaceApp {
             .cloned()
             .unwrap_or_else(|| Agent { name: saved.agent.clone(), cmd: saved.cmd.clone() });
         if let Err(e) = self.spawn(saved.name.clone(), &agent, saved.cwd.clone(), Some(&saved), saved.roots.clone()) {
-            self.flash(format!("{} を再開できませんでした: {e:#}", saved.name));
+            self.flash(lf!("{} を再開できませんでした: {e:#}", "Could not resume {}: {e:#}", saved.name));
             self.dormant.insert(i, saved);
         }
     }
@@ -596,7 +596,7 @@ impl PaispaceApp {
             Action::Editor(i) => {
                 let cwd = self.sessions[i].cwd.clone();
                 if !open_in(&self.cfg.editor_app, &cwd) {
-                    self.flash(format!("{} で開けませんでした", self.cfg.editor_app));
+                    self.flash(lf!("{} で開けませんでした", "Could not open with {}", self.cfg.editor_app));
                 }
             }
             Action::Resume(i) => self.resume_dormant(i),
@@ -675,7 +675,7 @@ impl PaispaceApp {
                 if !watching {
                     s.attention = true;
                     if self.cfg.notify {
-                        notify::send(&format!("{} が終了しました（{}）", s.name, s.exit.unwrap_or(0)), &s.agent);
+                        notify::send(&lf!("{} が終了しました（{}）", "{} exited ({})", s.name, s.exit.unwrap_or(0)), &s.agent);
                     }
                 }
                 continue;
@@ -687,7 +687,7 @@ impl PaispaceApp {
             if s.busy && !busy && s.work_after_input() >= min_busy && !watching {
                 s.attention = true;
                 if self.cfg.notify {
-                    notify::send(&format!("{} が待っています", s.name), &s.agent);
+                    notify::send(&lf!("{} が待っています", "{} is waiting for you", s.name), &s.agent);
                 }
             }
             s.busy = busy;
@@ -805,7 +805,7 @@ impl PaispaceApp {
         let top = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover()).0;
         ui::drag_area(ui, top, "side-drag");
         let mut top_ui = ui.new_child(egui::UiBuilder::new().max_rect(top).layout(Layout::right_to_left(Align::Center)));
-        if ui::icon_button(&mut top_ui, ui::icon::PLUS, "新しいセッション  ⌘N", false).clicked() {
+        if ui::icon_button(&mut top_ui, ui::icon::PLUS, l!("新しいセッション  ⌘N", "New session  ⌘N"), false).clicked() {
             acts.push(Action::New);
         }
         ui.add_space(14.0);
@@ -817,9 +817,9 @@ impl PaispaceApp {
             .show_inside(ui, |ui| {
                 if !self.dormant.is_empty() {
                     ui.horizontal(|ui| {
-                        ui::section(ui, "前回のセッション");
+                        ui::section(ui, l!("前回のセッション", "Last time"));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let r = ui.add(egui::Button::new(RichText::new("全部再開").size(11.0).color(MUTED)).frame(false));
+                            let r = ui.add(egui::Button::new(RichText::new(l!("全部再開", "Resume all")).size(11.0).color(MUTED)).frame(false));
                             if r.clicked() {
                                 acts.push(Action::ResumeAll);
                             }
@@ -844,7 +844,7 @@ impl PaispaceApp {
                                         ui.add(Label::new(RichText::new(&d.name).size(13.0).color(MUTED)).truncate());
                                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                             if hovered
-                                                && ui.add(egui::Button::new(RichText::new(ui::icon::X).size(12.0).color(FAINT)).frame(false)).on_hover_text("忘れる").clicked()
+                                                && ui.add(egui::Button::new(RichText::new(ui::icon::X).size(12.0).color(FAINT)).frame(false)).on_hover_text(l!("忘れる", "Forget")).clicked()
                                             {
                                                 acts.push(Action::Forget(i));
                                             }
@@ -852,7 +852,7 @@ impl PaispaceApp {
                                         });
                                     });
                                 });
-                            let how = if d.resumable() { "会話の続きから再開" } else { "同じフォルダで開き直す" };
+                            let how = if d.resumable() { l!("会話の続きから再開", "Resumes the conversation") } else { l!("同じフォルダで開き直す", "Starts fresh in the same folder") };
                             let r = ui.interact(inner.response.rect, id, Sense::click()).on_hover_text(format!("{}\n{how}", tilde(&d.cwd)));
                             if r.clicked() {
                                 acts.push(Action::Resume(i));
@@ -862,7 +862,7 @@ impl PaispaceApp {
                     ui.add_space(6.0);
                 }
                 ui.horizontal(|ui| {
-                    let r = ui.add(egui::Button::new(RichText::new(format!("{}  設定", ui::icon::GEAR_SIX)).size(12.0).color(FAINT)).frame(false));
+                    let r = ui.add(egui::Button::new(RichText::new(lf!("{}  設定", "{}  Settings", ui::icon::GEAR_SIX)).size(12.0).color(FAINT)).frame(false));
                     if r.on_hover_text("⌘,").clicked() {
                         acts.push(Action::Settings);
                     }
@@ -870,15 +870,15 @@ impl PaispaceApp {
             });
 
         ui.horizontal(|ui| {
-            ui::section(ui, "セッション");
+            ui::section(ui, l!("セッション", "Sessions"));
             let busy = self.sessions.iter().filter(|s| s.busy).count();
             let waiting = self.sessions.iter().filter(|s| s.attention).count();
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if waiting > 0 {
-                    ui.label(RichText::new(format!("待ち {waiting}")).size(11.0).color(WAITING));
+                    ui.label(RichText::new(lf!("待ち {waiting}", "{waiting} waiting")).size(11.0).color(WAITING));
                 }
                 if busy > 0 {
-                    ui.label(RichText::new(format!("動作中 {busy}")).size(11.0).color(ACCENT));
+                    ui.label(RichText::new(lf!("動作中 {busy}", "{busy} running")).size(11.0).color(ACCENT));
                 }
             });
         });
@@ -886,7 +886,7 @@ impl PaispaceApp {
 
         if self.sessions.is_empty() {
             ui.add_space(6.0);
-            ui.label(RichText::new("まだありません").size(12.0).color(FAINT));
+            ui.label(RichText::new(l!("まだありません", "None yet")).size(12.0).color(FAINT));
             return acts;
         }
 
@@ -926,7 +926,7 @@ impl PaispaceApp {
                             }
                         }
                         let t = match s.exit {
-                            Some(code) => format!("終了 {code}"),
+                            Some(code) => lf!("終了 {code}", "Exited {code}"),
                             None => elapsed(now.duration_since(s.created).as_secs()),
                         };
                         meta.push_str(&format!("  ·  {t}"));
@@ -945,7 +945,7 @@ impl PaispaceApp {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             ui.label(RichText::new(format!("+{}", g.added)).font(FontId::monospace(10.5)).color(OK.gamma_multiply(0.85)));
                             ui.label(RichText::new(format!("−{}", g.removed)).font(FontId::monospace(10.5)).color(BAD.gamma_multiply(0.85)));
-                            ui.label(RichText::new(format!("{} ファイル", g.files)).size(10.5).color(FAINT));
+                            ui.label(RichText::new(lf!("{} ファイル", "{} files", g.files)).size(10.5).color(FAINT));
                         });
                     }
                 });
@@ -966,28 +966,28 @@ impl PaispaceApp {
                 }
                 resp.context_menu(|ui| {
                     let item = |ui: &mut Ui, g: &str, t: &str| ui.button(format!("{g}  {t}")).clicked();
-                    if item(ui, ui::icon::PENCIL_SIMPLE, "名前を変える") {
+                    if item(ui, ui::icon::PENCIL_SIMPLE, l!("名前を変える", "Rename")) {
                         acts.push(Action::Rename(i));
                         ui.close();
                     }
-                    if item(ui, ui::icon::FOLDER_SIMPLE, "ファイル") {
+                    if item(ui, ui::icon::FOLDER_SIMPLE, l!("ファイル", "Files")) {
                         acts.push(Action::Files(i));
                         ui.close();
                     }
-                    if item(ui, ui::icon::GIT_DIFF, "差分") {
+                    if item(ui, ui::icon::GIT_DIFF, l!("差分", "Diff")) {
                         acts.push(Action::Diff(i));
                         ui.close();
                     }
-                    if item(ui, ui::icon::CODE, &format!("{} で開く", self.cfg.editor_app)) {
+                    if item(ui, ui::icon::CODE, &lf!("{} で開く", "Open in {}", self.cfg.editor_app)) {
                         acts.push(Action::Editor(i));
                         ui.close();
                     }
-                    if item(ui, ui::icon::FOLDER_OPEN, "Finder で開く") {
+                    if item(ui, ui::icon::FOLDER_OPEN, l!("Finder で開く", "Show in Finder")) {
                         acts.push(Action::Finder(i));
                         ui.close();
                     }
                     ui.separator();
-                    let label = if s.exit.is_some() { "一覧から外す" } else { "止める…" };
+                    let label = if s.exit.is_some() { l!("一覧から外す", "Remove from list") } else { l!("止める…", "Stop…") };
                     if ui.button(RichText::new(format!("{}  {label}", ui::icon::STOP)).color(BAD)).clicked() {
                         acts.push(if s.exit.is_some() { Action::Remove(i) } else { Action::Kill(i) });
                         ui.close();
@@ -999,7 +999,7 @@ impl PaispaceApp {
                 if skip > 0 {
                     ui.horizontal(|ui| {
                         ui.add_space(30.0);
-                        ui.label(RichText::new(format!("ほか {skip} 件")).size(10.5).color(FAINT));
+                        ui.label(RichText::new(lf!("ほか {skip} 件", "{skip} more")).size(10.5).color(FAINT));
                     });
                 }
                 for (depth, node) in list.iter().skip(skip) {
@@ -1028,7 +1028,7 @@ impl PaispaceApp {
                                 ui.add(Label::new(RichText::new(c.prompt.replace('\n', " ")).size(11.0).color(FAINT)).truncate());
                             });
                         });
-                    let how = if node.guessed { "\n\n（呼び出し元は推測：同じフォルダで、上の段が動いている間に始まった）" } else { "" };
+                    let how = if node.guessed { l!("\n\n（呼び出し元は推測：同じフォルダで、上の段が動いている間に始まった）", "\n\n(Caller is a guess: it started in the same folder while the row above was running)") } else { "" };
                     let r = ui.interact(inner.response.rect, id, Sense::click()).on_hover_text(format!("{}{how}", clip_text(&c.prompt, 300)));
                     if r.clicked() {
                         acts.push(Action::Child(c.id.clone()));
@@ -1062,28 +1062,28 @@ impl PaispaceApp {
 
         // 右側の操作
         if s.exit.is_some() {
-            if ui::icon_button(ui, ui::icon::X, "一覧から外す", false).clicked() {
+            if ui::icon_button(ui, ui::icon::X, l!("一覧から外す", "Remove from list"), false).clicked() {
                 acts.push(Action::Remove(i));
             }
-        } else if ui::icon_button_colored(ui, ui::icon::STOP, "止める  ⌘W", false, Some(BAD)).clicked() {
+        } else if ui::icon_button_colored(ui, ui::icon::STOP, l!("止める  ⌘W", "Stop  ⌘W"), false, Some(BAD)).clicked() {
             acts.push(Action::Kill(i));
         }
-        if ui::icon_button(ui, ui::icon::CODE, &format!("{} で開く", self.cfg.editor_app), false).clicked() {
+        if ui::icon_button(ui, ui::icon::CODE, &lf!("{} で開く", "Open in {}", self.cfg.editor_app), false).clicked() {
             acts.push(Action::Editor(i));
         }
         ui.add_space(4.0);
         ui.painter().vline(ui.cursor().right() - 2.0, bar.y_range().shrink(11.0), Stroke::new(1.0, BORDER));
         ui.add_space(6.0);
-        if ui::icon_button(ui, ui::icon::TREE_STRUCTURE, "エージェントマップ  ⌘G", matches!(self.side, Some(Side::Map) | Some(Side::Child))).clicked() {
+        if ui::icon_button(ui, ui::icon::TREE_STRUCTURE, l!("エージェントマップ  ⌘G", "Agent map  ⌘G"), matches!(self.side, Some(Side::Map) | Some(Side::Child))).clicked() {
             self.side = if self.side == Some(Side::Map) { None } else { Some(Side::Map) };
         }
-        if ui::icon_button(ui, ui::icon::GIT_DIFF, "差分  ⌘D", self.side == Some(Side::Diff)).clicked() {
+        if ui::icon_button(ui, ui::icon::GIT_DIFF, l!("差分  ⌘D", "Diff  ⌘D"), self.side == Some(Side::Diff)).clicked() {
             acts.push(Action::Diff(i));
         }
-        if ui::icon_button(ui, ui::icon::MAGNIFYING_GLASS, "検索  ⌘⇧F", self.side == Some(Side::Search)).clicked() {
+        if ui::icon_button(ui, ui::icon::MAGNIFYING_GLASS, l!("検索  ⌘⇧F", "Search  ⌘⇧F"), self.side == Some(Side::Search)).clicked() {
             acts.push(Action::Search(i));
         }
-        if ui::icon_button(ui, ui::icon::FOLDER_SIMPLE, "ファイル  ⌘E", self.side == Some(Side::Files)).clicked() {
+        if ui::icon_button(ui, ui::icon::FOLDER_SIMPLE, l!("ファイル  ⌘E", "Files  ⌘E"), self.side == Some(Side::Files)).clicked() {
             acts.push(Action::Files(i));
         }
         ui.add_space(8.0);
@@ -1101,7 +1101,7 @@ impl PaispaceApp {
                         }
                     }
                     let r = tab(ui, w.active.is_none(), &label, if s.attention { Some(WAITING) } else { None }, false)
-                        .on_hover_text(format!("{} · {}\n{}\n{}", s.agent, st, tilde(&s.cwd), if s.attention { "こちらを待っています" } else { "" }));
+                        .on_hover_text(format!("{} · {}\n{}\n{}", s.agent, st, tilde(&s.cwd), if s.attention { l!("こちらを待っています", "Waiting for you") } else { "" }));
                     let _ = sc;
                     if r.clicked() {
                         tab_act = Some(TabAct::Select(None));
@@ -1115,7 +1115,7 @@ impl PaispaceApp {
                         if r.middle_clicked() {
                             tab_act = Some(TabAct::Close(di));
                         }
-                        if (on || r.hovered()) && ui.add(egui::Button::new(RichText::new(ui::icon::X).size(11.0).color(FAINT)).frame(false)).on_hover_text("閉じる  ⌘W").clicked() {
+                        if (on || r.hovered()) && ui.add(egui::Button::new(RichText::new(ui::icon::X).size(11.0).color(FAINT)).frame(false)).on_hover_text(l!("閉じる  ⌘W", "Close  ⌘W")).clicked() {
                             tab_act = Some(TabAct::Close(di));
                         }
                     }
@@ -1202,21 +1202,21 @@ impl PaispaceApp {
             ui.label(RichText::new(ui::icon::ROBOT).size(15.0).color(ACCENT));
             ui.label(RichText::new(&v.label).font(ui::bold(13.5)).color(TEXT));
             let how = match v.kind {
-                children::Kind::Codex => "コマンドで呼ばれた codex",
-                children::Kind::Claude => "コマンドで呼ばれた claude",
-                children::Kind::ClaudeSub => "claude の子エージェント",
+                children::Kind::Codex => l!("コマンドで呼ばれた codex", "codex called by a command"),
+                children::Kind::Claude => l!("コマンドで呼ばれた claude", "claude called by a command"),
+                children::Kind::ClaudeSub => l!("claude の子エージェント", "claude subagent"),
             };
             ui.label(RichText::new(how).size(11.0).color(FAINT));
-            let (t, c) = if v.done { ("終わった", OK) } else if running { ("動いています", ACCENT) } else { ("途中で止まった", WAITING) };
+            let (t, c) = if v.done { (l!("終わった", "Done"), OK) } else if running { (l!("動いています", "Running"), ACCENT) } else { (l!("途中で止まった", "Stopped midway"), WAITING) };
             ui.label(RichText::new(t).size(11.0).color(c));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui::icon_button(ui, ui::icon::X, "閉じる", false).clicked() {
+                if ui::icon_button(ui, ui::icon::X, l!("閉じる", "Close"), false).clicked() {
                     close = true;
                 }
-                if ui::icon_button(ui, ui::icon::TREE_STRUCTURE, "エージェントマップへ", false).clicked() {
+                if ui::icon_button(ui, ui::icon::TREE_STRUCTURE, l!("エージェントマップへ", "Back to agent map"), false).clicked() {
                     to_map = true;
                 }
-                if ui::icon_button(ui, ui::icon::FILE_TEXT, "記録のファイルを開く", false).clicked() {
+                if ui::icon_button(ui, ui::icon::FILE_TEXT, l!("記録のファイルを開く", "Reveal the log file"), false).clicked() {
                     let _ = std::process::Command::new("open").arg("-R").arg(&v.file).status();
                 }
             });
@@ -1230,7 +1230,7 @@ impl PaispaceApp {
             for (n, st) in v.steps.iter().enumerate() {
                 match st.kind {
                     children::StepKind::Prompt => {
-                        ui.label(RichText::new("頼まれたこと").size(11.0).color(FAINT));
+                        ui.label(RichText::new(l!("頼まれたこと", "Asked to")).size(11.0).color(FAINT));
                         Frame::new().fill(RAISED).corner_radius(8).inner_margin(Margin::same(10)).show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.add(Label::new(RichText::new(&st.text).size(12.5).color(TEXT)).wrap());
@@ -1250,7 +1250,7 @@ impl PaispaceApp {
                             });
                     }
                     children::StepKind::Output => {
-                        egui::CollapsingHeader::new(RichText::new(format!("{}  結果  {}", ui::icon::ARROW_BEND_DOWN_RIGHT, clip_text(st.text.lines().next().unwrap_or(""), 60))).size(11.0).color(FAINT))
+                        egui::CollapsingHeader::new(RichText::new(lf!("{}  結果  {}", "{}  Result  {}", ui::icon::ARROW_BEND_DOWN_RIGHT, clip_text(st.text.lines().next().unwrap_or(""), 60))).size(11.0).color(FAINT))
                             .id_salt(("out", n))
                             .show(ui, |ui| {
                                 ui.add(Label::new(RichText::new(&st.text).font(mono.clone()).color(MUTED)).wrap());
@@ -1259,7 +1259,7 @@ impl PaispaceApp {
                     }
                     children::StepKind::Answer => {
                         ui.add_space(4.0);
-                        ui.label(RichText::new("答え").size(11.0).color(FAINT));
+                        ui.label(RichText::new(l!("答え", "Answer")).size(11.0).color(FAINT));
                         Frame::new().fill(OK.gamma_multiply(0.08)).stroke(Stroke::new(1.0, OK.gamma_multiply(0.35))).corner_radius(8).inner_margin(Margin::same(10)).show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.add(Label::new(RichText::new(&st.text).size(12.5).color(TEXT)).wrap());
@@ -1268,7 +1268,7 @@ impl PaispaceApp {
                 }
             }
             if v.steps.is_empty() {
-                ui.label(RichText::new("まだ記録がありません").color(FAINT));
+                ui.label(RichText::new(l!("まだ記録がありません", "Nothing recorded yet")).color(FAINT));
             }
         });
         if close {
@@ -1285,22 +1285,22 @@ impl PaispaceApp {
         let mut reload = false;
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("差分").size(15.0).strong().color(TEXT));
-            ui.label(RichText::new("コミットしていない変更").size(12.0).color(MUTED));
+            ui.label(RichText::new(l!("差分", "Diff")).size(15.0).strong().color(TEXT));
+            ui.label(RichText::new(l!("コミットしていない変更", "Uncommitted changes")).size(12.0).color(MUTED));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("閉じる").on_hover_text("⌘D").clicked() {
+                if ui.button(l!("閉じる", "Close")).on_hover_text("⌘D").clicked() {
                     close = true;
                 }
-                if ui.button("読み直す").clicked() {
+                if ui.button(l!("読み直す", "Reload")).clicked() {
                     reload = true;
                 }
             });
         });
         ui.add_space(6.0);
         if let Some(e) = &d.diff.error {
-            ui.label(RichText::new(format!("git の状態を取れませんでした: {e}")).color(MUTED));
+            ui.label(RichText::new(lf!("git の状態を取れませんでした: {e}", "Could not read git status: {e}")).color(MUTED));
         } else if d.diff.status.is_empty() {
-            ui.label(RichText::new("変更はありません").color(MUTED));
+            ui.label(RichText::new(l!("変更はありません", "No changes")).color(MUTED));
         } else {
             for l in d.diff.status.iter().take(30) {
                 let (code, path) = l.split_at(l.len().min(3));
@@ -1311,7 +1311,7 @@ impl PaispaceApp {
                 });
             }
             if d.diff.status.len() > 30 {
-                ui.label(RichText::new(format!("ほか {} 件", d.diff.status.len() - 30)).size(12.0).color(MUTED));
+                ui.label(RichText::new(lf!("ほか {} 件", "{} more", d.diff.status.len() - 30)).size(12.0).color(MUTED));
             }
             ui.add_space(6.0);
             ui.separator();
@@ -1357,15 +1357,16 @@ impl PaispaceApp {
         if let Some(mut st) = self.setup.take() {
             match st.show(ctx) {
                 setup::Outcome::Keep => self.setup = Some(st),
-                setup::Outcome::Cancel => {}
+                setup::Outcome::Cancel => crate::i18n::apply(&self.cfg.language),
                 setup::Outcome::Save(c) => match config::save(&c) {
                     Ok(()) => {
+                        crate::i18n::apply(&c.language);
                         self.term.font_size = c.font_size;
                         self.cfg = c;
-                        self.flash("設定を保存しました");
+                        self.flash(l!("設定を保存しました", "Settings saved"));
                     }
                     Err(e) => {
-                        self.flash(format!("設定を保存できませんでした: {e:#}"));
+                        self.flash(lf!("設定を保存できませんでした: {e:#}", "Could not save settings: {e:#}"));
                         self.setup = Some(st);
                     }
                 },
@@ -1385,13 +1386,13 @@ impl PaispaceApp {
             let mut send: Option<bool> = None;
             let modal = egui::Modal::new(Id::new("ask")).show(ctx, |ui| {
                 ui.set_width(520.0);
-                ui.label(RichText::new("エージェントに聞く").size(16.0).strong());
+                ui.label(RichText::new(l!("エージェントに聞く", "Ask the agent")).size(16.0).strong());
                 ui.add_space(4.0);
                 ui.label(RichText::new(a.text()).font(FontId::monospace(12.0)).color(MUTED));
                 ui.add_space(8.0);
                 let r = ui.add(
                     TextEdit::multiline(&mut a.comment)
-                        .hint_text("聞きたいこと・直してほしいこと")
+                        .hint_text(l!("聞きたいこと・直してほしいこと", "What to ask or fix"))
                         .desired_rows(3)
                         .desired_width(f32::INFINITY),
                 );
@@ -1401,13 +1402,13 @@ impl PaispaceApp {
                 }
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new(RichText::new("送る").strong()).fill(ACCENT.gamma_multiply(0.35))).on_hover_text("⌘Enter").clicked() {
+                    if ui.add(egui::Button::new(RichText::new(l!("送る", "Send")).strong()).fill(ACCENT.gamma_multiply(0.35))).on_hover_text("⌘Enter").clicked() {
                         send = Some(true);
                     }
-                    if ui.button("入力欄に入れるだけ").on_hover_text("Enter").clicked() {
+                    if ui.button(l!("入力欄に入れるだけ", "Just put it in the input")).on_hover_text("Enter").clicked() {
                         send = Some(false);
                     }
-                    if ui.button("やめる").clicked() {
+                    if ui.button(l!("やめる", "Cancel")).clicked() {
                         keep = false;
                     }
                 });
@@ -1450,7 +1451,7 @@ impl PaispaceApp {
             let mut keep = true;
             let modal = egui::Modal::new(Id::new("rename")).show(ctx, |ui| {
                 ui.set_width(360.0);
-                ui.label(RichText::new("名前を変える").size(16.0).strong());
+                ui.label(RichText::new(l!("名前を変える", "Rename")).size(16.0).strong());
                 ui.add_space(8.0);
                 ui.add(TextEdit::singleline(&mut name).desired_width(f32::INFINITY)).request_focus();
             });
@@ -1475,18 +1476,18 @@ impl PaispaceApp {
             let mut yes = false;
             let (title, body) = match &c {
                 Confirm::Kill(i) => (
-                    "止める".to_string(),
-                    format!("「{}」を止めます。worktree やファイルはそのまま残ります。", self.sessions.get(*i).map(|s| s.name.as_str()).unwrap_or("")),
+                    l!("止める", "Stop").to_string(),
+                    lf!("「{}」を止めます。worktree やファイルはそのまま残ります。", "Stop \"{}\"? The worktree and files are kept.", self.sessions.get(*i).map(|s| s.name.as_str()).unwrap_or("")),
                 ),
                 Confirm::Quit => {
                     let dirty = self.dirty_docs();
-                    let extra = if dirty > 0 { format!("保存していないファイルが {dirty} 個あります（保存されません）。") } else { String::new() };
-                    ("終わる".to_string(), format!("動いているセッションが {} 個あります。{extra}全部止めて終わりますか？\n\n次に開いたとき、サイドバーの「前回のセッション」から再開できます（claude と codex は会話の続きから）。", self.alive()))
+                    let extra = if dirty > 0 { lf!("保存していないファイルが {dirty} 個あります（保存されません）。", "{dirty} unsaved files will not be saved. ") } else { String::new() };
+                    (l!("終わる", "Quit").to_string(), lf!("動いているセッションが {} 個あります。{extra}全部止めて終わりますか？\n\n次に開いたとき、サイドバーの「前回のセッション」から再開できます（claude と codex は会話の続きから）。", "{} sessions are running. {extra}Stop them all and quit?\n\nNext time, you can resume them from \"Last time\" in the sidebar (claude and codex continue the conversation).", self.alive()))
                 }
                 Confirm::CloseDoc(cwd, i) => (
-                    "閉じる".to_string(),
-                    format!(
-                        "「{}」に保存していない変更があります。捨てて閉じますか？",
+                    l!("閉じる", "Close").to_string(),
+                    lf!(
+                        "「{}」に保存していない変更があります。捨てて閉じますか？", "\"{}\" has unsaved changes. Discard and close?",
                         self.ws.get(cwd).and_then(|w| w.docs.get(*i)).map(|d| d.title()).unwrap_or_default()
                     ),
                 ),
@@ -1498,10 +1499,10 @@ impl PaispaceApp {
                 ui.label(body);
                 ui.add_space(14.0);
                 ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new(RichText::new("はい").color(BAD).strong())).clicked() {
+                    if ui.add(egui::Button::new(RichText::new(l!("はい", "Yes")).color(BAD).strong())).clicked() {
                         yes = true;
                     }
-                    if ui.button("やめる").clicked() {
+                    if ui.button(l!("やめる", "Cancel")).clicked() {
                         keep = false;
                     }
                 });
@@ -1592,13 +1593,13 @@ impl eframe::App for PaispaceApp {
                         let cwd = self.sessions[self.sel].cwd.clone();
                         let mut close = false;
                         ui.horizontal(|ui| {
-                            let title = if side == Side::Files { "ファイル" } else { "検索" };
+                            let title = if side == Side::Files { l!("ファイル", "Files") } else { l!("検索", "Search") };
                             ui.label(RichText::new(title).font(ui::bold(13.5)).color(TEXT));
                             if side == Side::Files {
-                                ui.label(RichText::new("⌘P で名前から開く").size(11.0).color(FAINT));
+                                ui.label(RichText::new(l!("⌘P で名前から開く", "⌘P to open by name")).size(11.0).color(FAINT));
                             }
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui::icon_button(ui, ui::icon::X, "閉じる", false).clicked() {
+                                if ui::icon_button(ui, ui::icon::X, l!("閉じる", "Close"), false).clicked() {
                                     close = true;
                                 }
                             });
@@ -1632,7 +1633,7 @@ impl eframe::App for PaispaceApp {
                     ui.add_space((ui.available_height() * 0.28).max(40.0));
                     ui.label(RichText::new("paispace").font(ui::bold(30.0)).color(TEXT));
                     ui.add_space(2.0);
-                    ui.label(RichText::new("エージェントと一緒に書く").size(13.0).color(FAINT));
+                    ui.label(RichText::new(l!("エージェントと一緒に書く", "Write code with your agents")).size(13.0).color(FAINT));
                     ui.add_space(26.0);
                     let row = |ui: &mut Ui, g: &str, t: &str, k: &str| -> bool {
                         let (rect, r) = ui.allocate_exact_size(vec2(340.0, 38.0), Sense::click());
@@ -1645,20 +1646,20 @@ impl eframe::App for PaispaceApp {
                         p.text(rect.right_center() - vec2(14.0, 0.0), egui::Align2::RIGHT_CENTER, k, FontId::proportional(12.0), FAINT);
                         r.clicked()
                     };
-                    if row(ui, ui::icon::PLUS, "新しいセッション", "⌘N") {
+                    if row(ui, ui::icon::PLUS, l!("新しいセッション", "New session"), "⌘N") {
                         acts.push(Action::New);
                     }
                     if !self.dormant.is_empty() {
                         let n = self.dormant.len();
-                        if row(ui, ui::icon::ARROW_COUNTER_CLOCKWISE, &format!("前回の {n} セッションを再開"), "") {
+                        if row(ui, ui::icon::ARROW_COUNTER_CLOCKWISE, &lf!("前回の {n} セッションを再開", "Resume {n} sessions from last time"), "") {
                             acts.push(Action::ResumeAll);
                         }
                     }
-                    if row(ui, ui::icon::GEAR_SIX, "設定", "⌘,") {
+                    if row(ui, ui::icon::GEAR_SIX, l!("設定", "Settings"), "⌘,") {
                         acts.push(Action::Settings);
                     }
                     ui.add_space(28.0);
-                    ui.label(RichText::new("⌘P ファイルを開く   ·   ⌘⇧F 検索   ·   ⌘L 選んだ行をエージェントに聞く").size(11.5).color(FAINT));
+                    ui.label(RichText::new(l!("⌘P ファイルを開く   ·   ⌘⇧F 検索   ·   ⌘L 選んだ行をエージェントに聞く", "⌘P open a file   ·   ⌘⇧F search   ·   ⌘L ask the agent about the selection")).size(11.5).color(FAINT));
                 });
                 return;
             }
@@ -1699,7 +1700,7 @@ impl eframe::App for PaispaceApp {
                                 ui.label(RichText::new(format!("{}  ·  {}", self.sessions[sel].name, self.sessions[sel].agent)).size(11.5).color(MUTED));
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     ui.add_space(6.0);
-                                    if ui::icon_button(ui, ui::icon::CARET_DOWN, "隠す  ⌘J", false).clicked() {
+                                    if ui::icon_button(ui, ui::icon::CARET_DOWN, l!("隠す  ⌘J", "Hide  ⌘J"), false).clicked() {
                                         self.dock = false;
                                     }
                                 });
@@ -1714,7 +1715,7 @@ impl eframe::App for PaispaceApp {
                     match a {
                         DocAction::Save => {
                             if let Err(e) = w.docs[di].save() {
-                                self.flash = Some((format!("保存できませんでした: {e}"), Instant::now()));
+                                self.flash = Some((lf!("保存できませんでした: {e}", "Could not save: {e}"), Instant::now()));
                             }
                         }
                         DocAction::Ask => {
@@ -1724,7 +1725,7 @@ impl eframe::App for PaispaceApp {
                         }
                         DocAction::OpenInEditor => {
                             if !open_in(&self.cfg.editor_app, &w.docs[di].path) {
-                                self.flash = Some((format!("{} で開けませんでした", self.cfg.editor_app), Instant::now()));
+                                self.flash = Some((lf!("{} で開けませんでした", "Could not open with {}", self.cfg.editor_app), Instant::now()));
                             }
                         }
                     }
@@ -1779,8 +1780,8 @@ fn clip_text(s: &str, n: usize) -> String {
 
 fn elapsed(secs: u64) -> String {
     match secs {
-        0..60 => format!("{secs}秒"),
-        60..3600 => format!("{}分", secs / 60),
-        _ => format!("{}時間{}分", secs / 3600, secs / 60 % 60),
+        0..60 => lf!("{secs}秒", "{secs}s"),
+        60..3600 => lf!("{}分", "{}m", secs / 60),
+        _ => lf!("{}時間{}分", "{}h {}m", secs / 3600, secs / 60 % 60),
     }
 }

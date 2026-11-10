@@ -125,7 +125,7 @@ impl QuickOpen {
             ui.set_width(620.0_f32.min(screen.width() - 80.0));
             let r = ui.add(
                 TextEdit::singleline(&mut self.query)
-                    .hint_text("ファイル名の一部（例: appmain → src/app/main.rs）")
+                    .hint_text(l!("ファイル名の一部（例: appmain → src/app/main.rs）", "Part of a file name (e.g. appmain → src/app/main.rs)"))
                     .desired_width(f32::INFINITY)
                     .font(egui::FontId::proportional(15.0))
                     .margin(Margin::symmetric(10, 8)),
@@ -140,7 +140,7 @@ impl QuickOpen {
             ui.add_space(6.0);
             ScrollArea::vertical().max_height(380.0).auto_shrink([false, true]).show(ui, |ui| {
                 if hits.is_empty() {
-                    ui.label(RichText::new("見つかりません").color(MUTED));
+                    ui.label(RichText::new(l!("見つかりません", "Nothing found")).color(MUTED));
                 }
                 for (i, (_, f, abs)) in hits.iter().enumerate() {
                     let (dir, name) = match f.rfind('/') {
@@ -171,7 +171,7 @@ impl QuickOpen {
                 }
             });
             ui.add_space(4.0);
-            ui.label(RichText::new(format!("{} ファイル · ↑↓ 選ぶ · Enter 開く · Esc やめる", self.files.len())).size(11.0).color(FAINT));
+            ui.label(RichText::new(lf!("{} ファイル · ↑↓ 選ぶ · Enter 開く · Esc やめる", "{} files · ↑↓ select · Enter open · Esc cancel", self.files.len())).size(11.0).color(FAINT));
         });
         if enter && open.is_none() {
             open = hits.get(hi).map(|(_, _, p)| (*p).clone());

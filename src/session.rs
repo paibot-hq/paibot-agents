@@ -57,7 +57,7 @@ impl Session {
     ) -> Result<Self> {
         let pair = native_pty_system()
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-            .context("擬似端末を開けませんでした")?;
+            .context(l!("擬似端末を開けませんでした", "Could not open a pseudo terminal"))?;
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
         let mut cmd = CommandBuilder::new(&shell);
@@ -79,7 +79,7 @@ impl Session {
         cmd.env("PAISPACE", "1");
         cmd.env("PAISPACE_SESSION", &name);
 
-        let child = pair.slave.spawn_command(cmd).with_context(|| format!("{} を起動できませんでした", agent.name))?;
+        let child = pair.slave.spawn_command(cmd).with_context(|| lf!("{} を起動できませんでした", "Could not start {}", agent.name))?;
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader()?;

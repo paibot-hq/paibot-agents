@@ -59,7 +59,7 @@ pub fn list(cfg: &Config, recent: &[String]) -> Vec<Project> {
         }
     };
     for r in recent {
-        add(&mut out, &expand(r), "最近", None);
+        add(&mut out, &expand(r), l!("最近", "Recent"), None);
     }
 
     // ワークスペース: 設定にあるもの、置き場とその1つ上にあるもの、VSCode で最近開いたもの
@@ -100,7 +100,7 @@ pub fn list(cfg: &Config, recent: &[String]) -> Vec<Project> {
     for r in &recent_code {
         if let vscode::Recent::Folder(p) = r {
             if code_recent.len() < 15 {
-                add(&mut code_recent, p, "VSCode で最近開いた", None);
+                add(&mut code_recent, p, l!("VSCode で最近開いた", "Recently opened in VSCode"), None);
             }
         }
     }
@@ -108,7 +108,7 @@ pub fn list(cfg: &Config, recent: &[String]) -> Vec<Project> {
 
     let mut rest = Vec::new();
     for r in &cfg.projects {
-        add(&mut rest, &expand(r), "プロジェクト", None);
+        add(&mut rest, &expand(r), l!("プロジェクト", "Projects"), None);
     }
     for root in &cfg.project_roots {
         let Ok(rd) = std::fs::read_dir(expand(root)) else { continue };
@@ -116,7 +116,7 @@ pub fn list(cfg: &Config, recent: &[String]) -> Vec<Project> {
             let p = e.path();
             let hidden = p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'));
             if !hidden && p.is_dir() {
-                add(&mut rest, &p, "プロジェクト", None);
+                add(&mut rest, &p, l!("プロジェクト", "Projects"), None);
             }
         }
     }
@@ -133,12 +133,12 @@ pub fn folder(p: &Path) -> Option<Project> {
 /// .code-workspace のフォルダ（複数なら、それらだけを見せる「（ワークスペース）」を先頭に）
 pub fn workspace_projects(file: &Path) -> Vec<Project> {
     let Some(ws) = vscode::parse_workspace(file) else { return Vec::new() };
-    let group = format!("VSCode ワークスペース: {}", ws.name);
+    let group = lf!("VSCode ワークスペース: {}", "VSCode workspace: {}", ws.name);
     let mut v = Vec::new();
     if ws.folders.len() > 1 {
         // ワークスペースのフォルダだけを見せるセッション（親フォルダ全体ではない）
         v.push(Project {
-            name: format!("{}（ワークスペース）", ws.name),
+            name: lf!("{}（ワークスペース）", "{} (workspace)", ws.name),
             path: tilde(file),
             git: false,
             group: group.clone(),

@@ -1,3 +1,5 @@
+#[macro_use]
+mod i18n;
 mod app;
 mod children;
 mod config;
@@ -27,7 +29,20 @@ use std::sync::Arc;
 use anyhow::Result;
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
 
-const HELP: &str = "\
+fn help() -> &'static str {
+    if i18n::en() {
+        "\
+paispace — a desktop app for running coding agents side by side
+
+Usage: paispace [-a AGENT] [FOLDER | WORKSPACE.code-workspace]
+
+  FOLDER            first folder offered for new sessions (default: current directory)
+  .code-workspace   open a VSCode workspace and pick from its folders
+  -a AGENT          start one session with that agent (claude / codex / shell ...)
+
+Settings: ~/.config/paispace/config.toml"
+    } else {
+        "\
 paispace — コーディングエージェントを並べて動かすデスクトップアプリ
 
 使い方: paispace [-a エージェント] [フォルダ | ワークスペース.code-workspace]
@@ -36,30 +51,35 @@ paispace — コーディングエージェントを並べて動かすデスク�
   .code-workspace   VSCode のワークスペースを開き、そのフォルダから選ぶ
   -a エージェント   起動と同時にそのエージェントを1つ開く（claude / codex / shell など）
 
-設定は ~/.config/paispace/config.toml";
+設定は ~/.config/paispace/config.toml"
+    }
+}
 
 fn main() -> Result<()> {
+    // 言語は引数の説明より先に決める
+    let (cfg0, _) = config::load();
+    i18n::apply(&cfg0.language);
     let mut dir = None;
     let mut start = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => {
-                println!("{HELP}");
+                println!("{}", help());
                 return Ok(());
             }
             "-V" | "--version" => {
                 println!("paispace {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
-            "-a" | "--agent" => start = Some(args.next().ok_or_else(|| anyhow::anyhow!("-a のあとにエージェント名が要ります"))?),
-            _ if dir.is_some() => anyhow::bail!("フォルダは1つだけ指定できます（paispace --help）"),
+            "-a" | "--agent" => start = Some(args.next().ok_or_else(|| anyhow::anyhow!(l!("-a のあとにエージェント名が要ります", "-a needs an agent name")))?),
+            _ if dir.is_some() => anyhow::bail!(l!("フォルダは1つだけ指定できます（paispace --help）", "Only one folder can be given (paispace --help)")),
             _ => dir = Some(PathBuf::from(a)),
         }
     }
     let mut workspace = None;
     if let Some(d) = dir.clone().filter(|d| d.extension().is_some_and(|x| x == "code-workspace")) {
-        let f = std::fs::canonicalize(&d).map_err(|_| anyhow::anyhow!("ワークスペースが見つかりません: {}", d.display()))?;
+        let f = std::fs::canonicalize(&d).map_err(|_| anyhow::anyhow!("{}", lf!("ワークスペースが見つかりません: {}", "Workspace not found: {}", d.display())))?;
         dir = f.parent().map(|p| p.to_path_buf());
         workspace = Some(f);
     }
@@ -67,7 +87,7 @@ fn main() -> Result<()> {
         Some(d) => std::fs::canonicalize(&d)
             .ok()
             .filter(|p| p.is_dir())
-            .ok_or_else(|| anyhow::anyhow!("フォルダが見つかりません: {}", d.display()))?,
+            .ok_or_else(|| anyhow::anyhow!("{}", lf!("フォルダが見つかりません: {}", "Folder not found: {}", d.display())))?,
         None => {
             // Finder から開くと「/」になるので、そのときはホームにする
             let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
@@ -101,7 +121,7 @@ fn main() -> Result<()> {
             Ok(Box::new(app::PaispaceApp::new(cc, cfg, cfg_err, dir, start, workspace)))
         }),
     )
-    .map_err(|e| anyhow::anyhow!("ウィンドウを開けませんでした: {e}"))
+    .map_err(|e| anyhow::anyhow!("{}", lf!("ウィンドウを開けませんでした: {e}", "Could not open the window: {e}")))
 }
 
 fn load(fonts: &mut FontDefinitions, name: &str, path: &str, index: u32, tweak: Option<egui::FontTweak>) -> bool {

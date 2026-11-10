@@ -23,6 +23,10 @@
 - 初めて起動したときに設定画面（あとから ⌘,）。プロジェクトの置き場、入っているエージェント（自動で探す）、エディタを選ぶ
 - お節介はしない: フックを入れない、エージェントの設定に触らない、worktree を勝手に消さない
 
+## 言語
+
+日本語と英語に対応。設定（⌘,）の「言語 / Language」で選ぶ。既定の「自動」は macOS の言語設定に合わせる。設定ファイルでは `language = "auto" | "ja" | "en"`。
+
 ## 入れる
 
 ```sh
@@ -67,6 +71,7 @@ projects = []                 # 個別に並べたいフォルダ
 workspaces = []               # 並べたい .code-workspace（置き場とその1つ上にあるものは自動）
 vscode_recent = true          # VSCode などで最近開いたものも並べる
 default_agent = "claude"
+language = "auto"            # 画面の言語: auto / ja / en
 notify = true                 # 手が空いたら通知
 idle_secs = 2.0               # 出力がこの秒数止まったら「止まった」
 min_busy_secs = 5.0           # 入力のあとこの秒数以上動いてから止まったら「待ち」

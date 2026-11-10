@@ -24,6 +24,8 @@ pub struct Config {
     pub vscode_recent: bool,
     /// 新規作成で最初に選ばれているエージェント
     pub default_agent: String,
+    /// 画面の言語: "auto"（macOS の設定に合わせる）/ "ja" / "en"
+    pub language: String,
     /// 「エディタで開く」に使うアプリ
     pub editor_app: String,
     /// 手が空いたときにmacOSの通知を出す
@@ -45,6 +47,7 @@ impl Default for Config {
             workspaces: Vec::new(),
             vscode_recent: true,
             default_agent: "claude".into(),
+            language: "auto".into(),
             editor_app: "Visual Studio Code".into(),
             notify: true,
             font_size: 13.0,
@@ -108,14 +111,14 @@ pub fn load() -> (Config, Option<String>) {
             c.font_size = c.font_size.clamp(8.0, 32.0);
             (c, None)
         }
-        Err(e) => (Config::default(), Some(format!("{} を読めませんでした: {}", p.display(), e.message()))),
+        Err(e) => (Config::default(), Some(lf!("{} を読めませんでした: {}", "Could not read {}: {}", p.display(), e.message()))),
     }
 }
 
 pub fn save(c: &Config) -> Result<()> {
     std::fs::create_dir_all(dir())?;
     let body = toml::to_string_pretty(c)?;
-    std::fs::write(path(), format!("# paispace の設定。paispace の設定画面（⌘,）からも変えられます。\n\n{body}"))?;
+    std::fs::write(path(), lf!("# paispace の設定。paispace の設定画面（⌘,）からも変えられます。\n\n{body}", "# paispace settings. You can also change these in paispace (⌘,).\n\n{body}"))?;
     Ok(())
 }
 

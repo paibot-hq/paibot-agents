@@ -71,7 +71,7 @@ impl Search {
                     self.hits.push(Hit { file: format!("{prefix}{rel}"), abs: root.join(rel), line, text: t.trim().to_string() });
                 }
             }
-            Err(e) => self.error = Some(format!("検索できませんでした: {e}")),
+            Err(e) => self.error = Some(lf!("検索できませんでした: {e}", "Search failed: {e}")),
         }
         }
         self.hits.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
@@ -83,7 +83,7 @@ impl Search {
         let mut open = None;
         let r = ui.add(
             TextEdit::singleline(&mut self.query)
-                .hint_text("検索して Enter")
+                .hint_text(l!("検索して Enter", "Search and press Enter"))
                 .desired_width(f32::INFINITY)
                 .font(FontId::proportional(14.0))
                 .margin(Margin::symmetric(8, 6)),
@@ -106,8 +106,8 @@ impl Search {
                 v.dedup();
                 v.len()
             };
-            let more = if self.truncated { "（多いので途中まで）" } else { "" };
-            ui.label(RichText::new(format!("「{q}」 {} 件 · {files} ファイル{more}", self.hits.len())).size(12.0).color(MUTED));
+            let more = if self.truncated { l!("（多いので途中まで）", " (truncated)") } else { "" };
+            ui.label(RichText::new(lf!("「{q}」 {} 件 · {files} ファイル{more}", "\"{q}\" {} matches · {files} files{more}", self.hits.len())).size(12.0).color(MUTED));
         }
         ui.add_space(4.0);
         let q = self.searched.clone().unwrap_or_default();

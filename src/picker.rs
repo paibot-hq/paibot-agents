@@ -49,7 +49,7 @@ impl Picker {
     /// .code-workspace を選んで、そのフォルダを一覧の先頭に出す
     pub fn open_workspace_dialog(&mut self) {
         let Some(f) = rfd::FileDialog::new()
-            .add_filter("VSCode ワークスペース", &["code-workspace"])
+            .add_filter(l!("VSCode ワークスペース", "VSCode workspace"), &["code-workspace"])
             .set_directory(expand("~"))
             .pick_file()
         else {
@@ -61,7 +61,7 @@ impl Picker {
     pub fn open_workspace(&mut self, f: PathBuf) {
         let list = projects::workspace_projects(&f);
         if list.is_empty() {
-            self.message = Some(format!("{} にフォルダが見つかりませんでした", tilde(&f)));
+            self.message = Some(lf!("{} にフォルダが見つかりませんでした", "No folders found in {}", tilde(&f)));
             return;
         }
         let paths: Vec<String> = list.iter().map(|p| p.path.clone()).collect();
@@ -130,9 +130,9 @@ impl Picker {
         let modal = egui::Modal::new(Id::new("picker")).show(ctx, |ui| {
             ui.set_width(680.0_f32.min(screen.width() - 80.0));
             ui.horizontal(|ui| {
-                ui.label(RichText::new("新しいセッション").font(crate::ui::bold(17.0)).color(TEXT));
+                ui.label(RichText::new(l!("新しいセッション", "New session")).font(crate::ui::bold(17.0)).color(TEXT));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new("↑↓ 選ぶ · Tab エージェント · Enter 始める · Esc やめる").size(11.0).color(FAINT));
+                    ui.label(RichText::new(l!("↑↓ 選ぶ · Tab エージェント · Enter 始める · Esc やめる", "↑↓ select · Tab agent · Enter start · Esc cancel")).size(11.0).color(FAINT));
                 });
             });
             ui.add_space(12.0);
@@ -158,7 +158,7 @@ impl Picker {
             // 絞り込み
             let r = ui.add(
                 TextEdit::singleline(&mut self.query)
-                    .hint_text(format!("{}  プロジェクトを絞り込む", crate::ui::icon::MAGNIFYING_GLASS))
+                    .hint_text(lf!("{}  プロジェクトを絞り込む", "{}  Filter projects", crate::ui::icon::MAGNIFYING_GLASS))
                     .desired_width(f32::INFINITY)
                     .font(egui::FontId::proportional(15.0))
                     .margin(Margin::symmetric(10, 8)),
@@ -186,9 +186,9 @@ impl Picker {
                     ui.add_space(20.0);
                     ui.vertical_centered(|ui| {
                         let msg = if self.projects.is_empty() {
-                            "プロジェクトがまだありません。下の「ワークスペースを開く…」「フォルダを選ぶ…」か、設定（⌘,）で置き場を足してください"
+                            l!("プロジェクトがまだありません。下の「ワークスペースを開く…」「フォルダを選ぶ…」か、設定（⌘,）で置き場を足してください", "No projects yet. Use \"Open workspace…\" or \"Choose folder…\" below, or add a projects folder in Settings (⌘,)")
                         } else {
-                            "見つかりません"
+                            l!("見つかりません", "Nothing found")
                         };
                         ui.label(RichText::new(msg).color(MUTED));
                     });
@@ -246,11 +246,11 @@ impl Picker {
             ui.add_space(6.0);
             let git = chosen.as_ref().is_some_and(|c| c.git);
             ui.horizontal(|ui| {
-                ui.add_enabled(git, egui::Checkbox::new(&mut self.worktree, "新しいブランチ（worktree）で始める"));
+                ui.add_enabled(git, egui::Checkbox::new(&mut self.worktree, l!("新しいブランチ（worktree）で始める", "Start on a new branch (worktree)")));
                 if self.worktree && git {
                     ui.add(
                         TextEdit::singleline(&mut self.branch)
-                            .hint_text("ブランチ名")
+                            .hint_text(l!("ブランチ名", "Branch name"))
                             .desired_width(200.0)
                             .font(egui::FontId::monospace(13.0)),
                     );
@@ -259,23 +259,23 @@ impl Picker {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 let can = chosen.is_some();
-                let start = egui::Button::new(RichText::new(format!("{}  始める", crate::ui::icon::PLAY)).size(13.5).color(egui::Color32::WHITE))
+                let start = egui::Button::new(RichText::new(lf!("{}  始める", "{}  Start", crate::ui::icon::PLAY)).size(13.5).color(egui::Color32::WHITE))
                     .min_size(vec2(110.0, 32.0))
                     .corner_radius(7.0)
                     .fill(ACCENT.gamma_multiply(0.55));
                 if ui.add_enabled(can, start).clicked() {
                     start_dir = chosen.clone();
                 }
-                if ui.button(format!("{}  ワークスペースを開く…", crate::ui::icon::CODE)).on_hover_text(".code-workspace を選ぶ  ⌘O").clicked() {
+                if ui.button(lf!("{}  ワークスペースを開く…", "{}  Open workspace…", crate::ui::icon::CODE)).on_hover_text(l!(".code-workspace を選ぶ  ⌘O", "Choose a .code-workspace  ⌘O")).clicked() {
                     open_ws = true;
                 }
-                if ui.button("フォルダを選ぶ…").clicked() {
+                if ui.button(l!("フォルダを選ぶ…", "Choose folder…")).clicked() {
                     let base = chosen.as_ref().map(|c| expand(&c.path)).unwrap_or_else(|| expand("~"));
                     if let Some(p) = rfd::FileDialog::new().set_directory(base).pick_folder() {
                         start_dir = projects::folder(&p);
                     }
                 }
-                if ui.button("やめる").clicked() {
+                if ui.button(l!("やめる", "Cancel")).clicked() {
                     out = Outcome::Cancel;
                 }
             });
@@ -292,7 +292,7 @@ impl Picker {
         }
         if let Some(p) = start_dir {
             if !p.roots.is_empty() {
-                let name = p.name.trim_end_matches("（ワークスペース）").to_string();
+                let name = p.name.trim_end_matches(l!("（ワークスペース）", " (workspace)")).to_string();
                 return Outcome::Start { dir: p.path, agent: self.agent, branch: String::new(), roots: p.roots, name: Some(name) };
             }
             if self.worktree && self.branch.trim().is_empty() {

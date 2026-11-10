@@ -82,24 +82,24 @@ impl Doc {
         let size = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
         if size > MAX_VIEW_BYTES {
             self.text.clear();
-            self.readonly = Some(format!("大きいので開けません（{} MB）", size / 1024 / 1024));
+            self.readonly = Some(lf!("大きいので開けません（{} MB）", "Too large to open ({} MB)", size / 1024 / 1024));
         } else {
             match std::fs::read(&self.path) {
                 Ok(bytes) if bytes.iter().take(8000).any(|b| *b == 0) => {
                     self.text.clear();
-                    self.readonly = Some(format!("バイナリなので開けません（{} KB）", bytes.len() / 1024));
+                    self.readonly = Some(lf!("バイナリなので開けません（{} KB）", "Binary file, not shown ({} KB)", bytes.len() / 1024));
                 }
                 Ok(bytes) => {
                     self.text = String::from_utf8_lossy(&bytes).into_owned();
                     if size > MAX_EDIT_BYTES {
-                        self.readonly = Some("大きいので読むだけにしています".into());
+                        self.readonly = Some(l!("大きいので読むだけにしています", "Read-only because it is large").into());
                     } else if std::str::from_utf8(&bytes).is_err() {
-                        self.readonly = Some("UTF-8 ではないので読むだけにしています".into());
+                        self.readonly = Some(l!("UTF-8 ではないので読むだけにしています", "Read-only because it is not UTF-8").into());
                     }
                 }
                 Err(e) => {
                     self.text.clear();
-                    self.readonly = Some(format!("読めませんでした: {e}"));
+                    self.readonly = Some(lf!("読めませんでした: {e}", "Could not read: {e}"));
                 }
             }
         }
@@ -178,29 +178,29 @@ pub fn show(ui: &mut Ui, doc: &mut Doc, root: &Path, font_size: f32) -> Vec<DocA
         ui.horizontal(|ui| {
             ui.add(Label::new(RichText::new(&rel).size(12.0).color(MUTED)).truncate());
             if doc.dirty() {
-                ui.label(RichText::new("● 未保存").size(11.0).color(WAITING));
+                ui.label(RichText::new(l!("● 未保存", "● Unsaved")).size(11.0).color(WAITING));
             }
             if let Some(r) = &doc.readonly {
                 ui.label(RichText::new(r).size(11.0).color(FAINT));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                if ui::icon_button(ui, ui::icon::CODE, "エディタで開く", false).clicked() {
+                if ui::icon_button(ui, ui::icon::CODE, l!("エディタで開く", "Open in editor"), false).clicked() {
                     acts.push(DocAction::OpenInEditor);
                 }
                 let ask = match doc.selection {
-                    Some((a, b)) if a != b => format!("{a}〜{b} 行目を聞く"),
-                    Some((a, _)) => format!("{a} 行目を聞く"),
-                    None => "このファイルについて聞く".into(),
+                    Some((a, b)) if a != b => lf!("{a}〜{b} 行目を聞く", "Ask about lines {a}–{b}"),
+                    Some((a, _)) => lf!("{a} 行目を聞く", "Ask about line {a}"),
+                    None => l!("このファイルについて聞く", "Ask about this file").into(),
                 };
                 let b = egui::Button::new(RichText::new(format!("{}  {ask}", ui::icon::SPARKLE)).size(12.0).color(ACCENT))
                     .fill(ACCENT.gamma_multiply(0.12))
                     .corner_radius(6.0);
-                if ui.add(b).on_hover_text("⌘L  エージェントの入力欄に入れる").clicked() {
+                if ui.add(b).on_hover_text(l!("⌘L  エージェントの入力欄に入れる", "⌘L  Put it in the agent's input")).clicked() {
                     acts.push(DocAction::Ask);
                 }
                 if doc.readonly.is_none() && doc.dirty() {
-                    let b = egui::Button::new(RichText::new(format!("{}  保存", ui::icon::FLOPPY_DISK)).size(12.0)).corner_radius(6.0);
+                    let b = egui::Button::new(RichText::new(lf!("{}  保存", "{}  Save", ui::icon::FLOPPY_DISK)).size(12.0)).corner_radius(6.0);
                     if ui.add(b).on_hover_text("⌘S").clicked() {
                         acts.push(DocAction::Save);
                     }
@@ -213,11 +213,11 @@ pub fn show(ui: &mut Ui, doc: &mut Doc, root: &Path, font_size: f32) -> Vec<DocA
         Frame::new().fill(WAITING.gamma_multiply(0.15)).inner_margin(Margin::symmetric(12, 6)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.label(RichText::new("このファイルは外で書き換わりました（エージェントかもしれません）").color(WAITING));
-                if ui.small_button("読み直す（こちらの変更を捨てる）").clicked() {
+                ui.label(RichText::new(l!("このファイルは外で書き換わりました（エージェントかもしれません）", "This file changed on disk (maybe by an agent)")).color(WAITING));
+                if ui.small_button(l!("読み直す（こちらの変更を捨てる）", "Reload (discard my changes)")).clicked() {
                     doc.reload();
                 }
-                if ui.small_button("こちらを残す").clicked() {
+                if ui.small_button(l!("こちらを残す", "Keep mine")).clicked() {
                     doc.external = false;
                 }
             });
