@@ -34,6 +34,57 @@ pub struct Kid {
     pub state: State,
     pub tools: usize,
     pub color: Color32,
+    /// 親を推測でつないだ（点線にする）
+    pub guessed: bool,
+    /// さらに呼んだもの
+    pub kids: Vec<Kid>,
+}
+
+impl Kid {
+    /// 自分と、その下の全部
+    fn walk<'a>(&'a self, out: &mut Vec<&'a Kid>) {
+        out.push(self);
+        for k in &self.kids {
+            k.walk(out);
+        }
+    }
+}
+
+/// レーンの下の全部（深さつき、親の番号つき）
+fn flat(kids: &[Kid]) -> Vec<(usize, Option<usize>, &Kid)> {
+    fn go<'a>(ks: &'a [Kid], d: usize, parent: Option<usize>, out: &mut Vec<(usize, Option<usize>, &'a Kid)>) {
+        for k in ks {
+            let me = out.len();
+            out.push((d, parent, k));
+            go(&k.kids, d + 1, Some(me), out);
+        }
+    }
+    let mut out = Vec::new();
+    go(kids, 0, None, &mut out);
+    out
+}
+
+fn all_kids(lanes: &[Lane]) -> Vec<&Kid> {
+    let mut v = Vec::new();
+    for l in lanes {
+        for k in &l.kids {
+            k.walk(&mut v);
+        }
+    }
+    v
+}
+
+/// 点線のベジェ曲線
+fn dashed(p: &egui::Painter, pts: [Pos2; 4], stroke: Stroke) {
+    let n = 28;
+    for i in 0..n {
+        if i % 2 == 1 {
+            continue;
+        }
+        let a = bezier(pts, i as f32 / n as f32);
+        let b = bezier(pts, (i + 1) as f32 / n as f32);
+        p.line_segment([a, b], stroke);
+    }
 }
 
 pub struct Lane {
@@ -147,8 +198,8 @@ pub fn show(ui: &mut Ui, lanes: &[Lane], window: &mut Window, view: &mut View) -
 
     // 見出し
     let running = lanes.iter().filter(|l| l.state == State::Running).count()
-        + lanes.iter().flat_map(|l| &l.kids).filter(|k| k.state == State::Running).count();
-    let called = lanes.iter().map(|l| l.kids.len()).sum::<usize>();
+        + all_kids(lanes).iter().filter(|k| k.state == State::Running).count();
+    let called = all_kids(lanes).len();
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(ui::icon::TREE_STRUCTURE).size(15.0).color(ACCENT));
         ui.label(egui::RichText::new("エージェントマップ").font(ui::bold(13.5)).color(TEXT));
@@ -175,8 +226,8 @@ pub fn show(ui: &mut Ui, lanes: &[Lane], window: &mut Window, view: &mut View) -
     });
     ui.add_space(8.0);
     // 大きな数字の帯
-    let tools: usize = lanes.iter().flat_map(|l| &l.kids).map(|k| k.tools).sum();
-    let busy_kids = lanes.iter().flat_map(|l| &l.kids).filter(|k| k.state == State::Running).count();
+    let tools: usize = all_kids(lanes).iter().map(|k| k.tools).sum();
+    let busy_kids = all_kids(lanes).iter().filter(|k| k.state == State::Running).count();
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         let w = ((ui.available_width() - 24.0) / 4.0).max(60.0);
@@ -235,7 +286,7 @@ pub fn show(ui: &mut Ui, lanes: &[Lane], window: &mut Window, view: &mut View) -
     let label_w = 168.0;
     let lane_h = 34.0;
     let kid_h = 26.0;
-    let total_h: f32 = lanes.iter().map(|l| lane_h + l.kids.len() as f32 * kid_h + 10.0).sum::<f32>() + 28.0;
+    let total_h: f32 = lanes.iter().map(|l| lane_h + flat(&l.kids).len() as f32 * kid_h + 10.0).sum::<f32>() + 28.0;
 
     egui::ScrollArea::vertical().id_salt("map").auto_shrink([false, false]).show(ui, |ui| {
         let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), total_h), Sense::hover());
@@ -284,8 +335,17 @@ pub fn show(ui: &mut Ui, lanes: &[Lane], window: &mut Window, view: &mut View) -
             let parent_y = cy + 6.0;
             y += lane_h;
 
-            for (ki, kid) in lane.kids.iter().enumerate() {
+            let rows = flat(&lane.kids);
+            let mut row_y: Vec<f32> = Vec::new();
+            for (ki, (depth, parent, kid)) in rows.iter().enumerate() {
                 let ky = y + kid_h / 2.0;
+                row_y.push(ky);
+                // 親が呼ばれたエージェントなら、その帯から線を出す
+                let parent_y = match parent {
+                    Some(pi) => row_y[*pi] + 5.0,
+                    None => parent_y,
+                };
+                let indent = (*depth as f32).min(6.0) * 12.0;
                 let end = kid.end.unwrap_or(now);
                 let sx = x_of(kid.start);
                 let ex = x_of(end).max(sx + 6.0);
@@ -296,7 +356,11 @@ pub fn show(ui: &mut Ui, lanes: &[Lane], window: &mut Window, view: &mut View) -
                 let b = pos2(sx, ky - 4.0);
                 let pts = [a, pos2(a.x - 10.0, a.y + (b.y - a.y) * 0.6), pos2(b.x - 10.0, b.y - 2.0), pos2(b.x + 2.0, b.y + 4.0)];
                 let line_c = if kid.state == State::Running { kid.color.gamma_multiply(0.75) } else { kid.color.gamma_multiply(0.35) };
-                p.add(Shape::CubicBezier(CubicBezierShape::from_points_stroke(pts, false, Color32::TRANSPARENT, Stroke::new(1.2, line_c))));
+                if kid.guessed {
+                    dashed(&p, pts, Stroke::new(1.2, line_c));
+                } else {
+                    p.add(Shape::CubicBezier(CubicBezierShape::from_points_stroke(pts, false, Color32::TRANSPARENT, Stroke::new(1.2, line_c))));
+                }
                 if kid.state == State::Running {
                     // 線の上を流れる光の粒
                     for n in 0..3 {
@@ -307,10 +371,14 @@ pub fn show(ui: &mut Ui, lanes: &[Lane], window: &mut Window, view: &mut View) -
                 p.circle_filled(a, 2.5, kid.color.gamma_multiply(0.8));
 
                 // 名前と頼まれたこと
-                p.text(pos2(area.left() + 22.0, ky), Align2::LEFT_CENTER, ui::icon::ARROW_ELBOW_DOWN_RIGHT, FontId::proportional(11.0), FAINT);
-                p.text(pos2(area.left() + 38.0, ky), Align2::LEFT_CENTER, clip(&kid.label, 12), ui::bold(11.0), kid.color);
-                let lw = p.layout_no_wrap(clip(&kid.label, 12), ui::bold(11.0), kid.color).size().x;
-                p.text(pos2(area.left() + 44.0 + lw, ky), Align2::LEFT_CENTER, clip(&kid.prompt, ((label_w - 60.0 - lw) / 6.5).max(4.0) as usize), FontId::proportional(10.5), FAINT);
+                p.text(pos2(area.left() + 22.0 + indent, ky), Align2::LEFT_CENTER, ui::icon::ARROW_ELBOW_DOWN_RIGHT, FontId::proportional(11.0), FAINT);
+                let lf = ui::bold(11.0);
+                let label = fit(&p, &kid.label, &lf, 60.0);
+                p.text(pos2(area.left() + 38.0 + indent, ky), Align2::LEFT_CENTER, &label, lf.clone(), kid.color);
+                let lw = p.layout_no_wrap(label, lf, kid.color).size().x;
+                let pf = FontId::proportional(10.5);
+                let room = (label_w - 46.0 - indent - lw).max(10.0);
+                p.text(pos2(area.left() + 44.0 + indent + lw, ky), Align2::LEFT_CENTER, fit(&p, &kid.prompt, &pf, room), pf, FAINT);
 
                 bar(&p, kr, kid.color, kid.state, t + (li * 7 + ki) as f64 * 0.29);
                 // 帯の右に、使った道具の数と時間
@@ -412,82 +480,129 @@ fn node(p: &egui::Painter, r: Rect, color: Color32, state: State, title: &str, s
     }
 }
 
-/// 点と線のグラフ。左にセッション、右に呼ばれたエージェント
+/// 点と線のグラフ。左にセッション、右へ段ごとに呼ばれたエージェント
 fn graph(ui: &mut Ui, lanes: &[Lane], t: f64, now: SystemTime) -> Option<Click> {
     let mut clicked = None;
-    let w0 = 200.0;
-    let h0 = 66.0;
-    let h1 = 66.0;
+    let mut w0 = 200.0;
+    let mut w1 = 240.0;
+    let h = 66.0;
     let gap = 12.0;
-    let between = 72.0;
+    let mut between = 64.0;
     let block_gap = 26.0;
-    let heights: Vec<f32> = lanes
-        .iter()
-        .map(|l| {
-            let kids = l.kids.len() as f32;
-            (kids * h1 + (kids - 1.0).max(0.0) * gap).max(h0)
-        })
-        .collect();
+
+    // 部分木の高さ
+    fn sub_h(k: &Kid, h: f32, gap: f32) -> f32 {
+        if k.kids.is_empty() {
+            return h;
+        }
+        let c: f32 = k.kids.iter().map(|x| sub_h(x, h, gap)).sum::<f32>() + gap * (k.kids.len() as f32 - 1.0);
+        c.max(h)
+    }
+    fn kids_h(ks: &[Kid], h: f32, gap: f32) -> f32 {
+        if ks.is_empty() {
+            return 0.0;
+        }
+        ks.iter().map(|x| sub_h(x, h, gap)).sum::<f32>() + gap * (ks.len() as f32 - 1.0)
+    }
+    fn depth(ks: &[Kid]) -> usize {
+        ks.iter().map(|k| 1 + depth(&k.kids)).max().unwrap_or(0)
+    }
+    let heights: Vec<f32> = lanes.iter().map(|l| kids_h(&l.kids, h, gap).max(h)).collect();
+    let max_depth = lanes.iter().map(|l| depth(&l.kids)).max().unwrap_or(0);
     let total_h = heights.iter().sum::<f32>() + block_gap * lanes.len() as f32 + 10.0;
+    // 段が深くてはみ出すときは、箱と間隔を縮めてパネルに収める（縮めすぎるときは横に動かせる）
+    let avail = ui.available_width() - 16.0;
+    let need = w0 + max_depth as f32 * (between + w1);
+    if need > avail && max_depth > 0 {
+        let k = (avail / need).max(0.55);
+        w0 *= k;
+        w1 *= k;
+        between = (between * k).max(28.0);
+    }
+    let total_w = 8.0 + w0 + max_depth as f32 * (between + w1) + 8.0;
+
+    struct Ctx<'a> {
+        p: egui::Painter,
+        t: f64,
+        now: SystemTime,
+        w1: f32,
+        h: f32,
+        gap: f32,
+        between: f32,
+        clicked: &'a mut Option<Click>,
+    }
+
+    /// ks を x の列に、y から並べ、from から線を引く。さらに下の段も描く
+    fn draw_kids(ui: &mut Ui, c: &mut Ctx, ks: &[Kid], from: Pos2, from_color: Color32, x: f32, mut y: f32, salt: usize) {
+        for (ki, kid) in ks.iter().enumerate() {
+            let sh = sub_h(kid, c.h, c.gap);
+            let r = Rect::from_min_size(pos2(x, y + (sh - c.h) / 2.0), vec2(c.w1, c.h));
+            let b = pos2(r.left(), r.center().y);
+            let dx = (b.x - from.x) * 0.5;
+            let pts = [from, pos2(from.x + dx, from.y), pos2(b.x - dx, b.y), b];
+            let running = kid.state == State::Running;
+            let lc = if running { kid.color.gamma_multiply(0.8) } else { kid.color.gamma_multiply(0.38) };
+            let stroke = Stroke::new(if running { 2.0 } else { 1.3 }, lc);
+            if kid.guessed {
+                dashed(&c.p, pts, stroke);
+            } else {
+                c.p.add(Shape::CubicBezier(CubicBezierShape::from_points_stroke(pts, false, Color32::TRANSPARENT, stroke)));
+            }
+            c.p.add(Shape::convex_polygon(vec![b, b + vec2(-7.0, -4.0), b + vec2(-7.0, 4.0)], lc, Stroke::NONE));
+            if running {
+                for n in 0..3 {
+                    let f = ((c.t * 0.8 + (n as f64) / 3.0 + (salt + ki) as f64 * 0.13).fract()) as f32;
+                    c.p.circle_filled(bezier(pts, f), 2.6, kid.color.gamma_multiply(0.95 - 0.25 * n as f32));
+                }
+            }
+            c.p.circle_filled(from, 3.0, from_color.gamma_multiply(0.8));
+
+            let resp = ui.interact(r, ui.id().with(("node", &kid.id)), Sense::click());
+            let end = kid.end.unwrap_or(c.now);
+            let dur = end.duration_since(kid.start).unwrap_or_default();
+            let mut foot = format!("{} 道具 {}  ·  {}", ui::icon::WRENCH, kid.tools, secs(dur));
+            if !kid.kids.is_empty() {
+                foot.push_str(&format!("  ·  {} を呼んだ", kid.kids.len()));
+            }
+            node(&c.p, r, kid.color, kid.state, &kid.label, &kid.prompt, &foot, c.t + (salt * 7 + ki) as f64 * 0.31, false, resp.hovered());
+            let how = if kid.guessed { "\n\n（呼び出し元は推測：同じフォルダで、左の箱が動いている間に始まった）" } else { "" };
+            let tip = format!(
+                "{}\n\n頼まれたこと: {}\n\n{}{how}",
+                kid.label,
+                clip(&kid.prompt, 300),
+                if kid.last.is_empty() { String::new() } else { format!("答え: {}", clip(&kid.last, 300)) }
+            );
+            if resp.on_hover_text(tip).clicked() {
+                *c.clicked = Some(Click::Kid(kid.id.clone()));
+            }
+            if !kid.kids.is_empty() {
+                let inner = kids_h(&kid.kids, c.h, c.gap);
+                let nx = x + c.w1 + c.between;
+                draw_kids(ui, c, &kid.kids, pos2(r.right(), r.center().y), kid.color, nx, y + (sh - inner) / 2.0, salt * 31 + ki + 1);
+            }
+            y += sh + c.gap;
+        }
+    }
 
     egui::ScrollArea::both().id_salt("graph").auto_shrink([false, false]).show(ui, |ui| {
-        let width = ui.available_width().max(w0 + between + 240.0);
+        let width = ui.available_width().max(total_w);
         let (area, _) = ui.allocate_exact_size(vec2(width, total_h), Sense::hover());
-        let p = ui.painter_at(area);
+        let mut c = Ctx { p: ui.painter_at(area), t, now, w1, h, gap, between, clicked: &mut clicked };
         let x0 = area.left() + 4.0;
         let x1 = x0 + w0 + between;
-        let w1 = (area.right() - x1 - 8.0).clamp(220.0, 360.0);
         let mut y = area.top() + 4.0;
-
         for (li, (lane, bh)) in lanes.iter().zip(&heights).enumerate() {
-            // セッションの箱（子の並びの真ん中に）
-            let r0 = Rect::from_min_size(pos2(x0, y + (bh - h0) / 2.0), vec2(w0, h0));
+            let r0 = Rect::from_min_size(pos2(x0, y + (bh - h) / 2.0), vec2(w0, h));
             let resp0 = ui.interact(r0, ui.id().with(("lane", li)), Sense::click());
             let age = now.duration_since(lane.start).unwrap_or_default();
-            let foot = if lane.kids.is_empty() { secs(age) } else { format!("{} を呼んだ · {}", lane.kids.len(), secs(age)) };
-            node(&p, r0, lane.color, lane.state, &lane.name, &lane.agent, &foot, t + li as f64 * 0.4, false, resp0.hovered());
+            let n = lane.kids.len();
+            let foot = if n == 0 { secs(age) } else { format!("{n} を呼んだ · {}", secs(age)) };
+            node(&c.p, r0, lane.color, lane.state, &lane.name, &lane.agent, &foot, t + li as f64 * 0.4, false, resp0.hovered());
             if resp0.on_hover_text("クリックでこのセッションへ").clicked() {
-                clicked = Some(Click::Lane(li));
+                *c.clicked = Some(Click::Lane(li));
             }
-
-            // 呼ばれたエージェント
-            let mut ky = y + (bh - (lane.kids.len() as f32 * h1 + (lane.kids.len() as f32 - 1.0).max(0.0) * gap)).max(0.0) / 2.0;
-            for (ki, kid) in lane.kids.iter().enumerate() {
-                let r1 = Rect::from_min_size(pos2(x1, ky), vec2(w1, h1));
-                // 線
-                let a = pos2(r0.right(), r0.center().y);
-                let b = pos2(r1.left(), r1.center().y);
-                let dx = (b.x - a.x) * 0.5;
-                let pts = [a, pos2(a.x + dx, a.y), pos2(b.x - dx, b.y), b];
-                let running = kid.state == State::Running;
-                let lc = if running { kid.color.gamma_multiply(0.8) } else { kid.color.gamma_multiply(0.35) };
-                p.add(Shape::CubicBezier(CubicBezierShape::from_points_stroke(pts, false, Color32::TRANSPARENT, Stroke::new(if running { 2.0 } else { 1.3 }, lc))));
-                // 矢印の先
-                p.add(Shape::convex_polygon(vec![b, b + vec2(-7.0, -4.0), b + vec2(-7.0, 4.0)], lc, Stroke::NONE));
-                if running {
-                    for n in 0..3 {
-                        let f = ((t * 0.8 + (n as f64) / 3.0 + ki as f64 * 0.13).fract()) as f32;
-                        p.circle_filled(bezier(pts, f), 2.6, kid.color.gamma_multiply(0.95 - 0.25 * n as f32));
-                    }
-                }
-                p.circle_filled(a, 3.0, lane.color.gamma_multiply(0.8));
-
-                let resp = ui.interact(r1, ui.id().with(("node", &kid.id)), Sense::click());
-                let end = kid.end.unwrap_or(now);
-                let dur = end.duration_since(kid.start).unwrap_or_default();
-                let foot = format!("{} 道具 {}  ·  {}", ui::icon::WRENCH, kid.tools, secs(dur));
-                node(&p, r1, kid.color, kid.state, &kid.label, &kid.prompt, &foot, t + (li * 7 + ki) as f64 * 0.31, false, resp.hovered());
-                let tip = format!(
-                    "{}\n\n頼まれたこと: {}\n\n{}",
-                    kid.label,
-                    clip(&kid.prompt, 300),
-                    if kid.last.is_empty() { String::new() } else { format!("答え: {}", clip(&kid.last, 300)) }
-                );
-                if resp.on_hover_text(tip).clicked() {
-                    clicked = Some(Click::Kid(kid.id.clone()));
-                }
-                ky += h1 + gap;
-            }
+            let inner = kids_h(&lane.kids, h, gap);
+            draw_kids(ui, &mut c, &lane.kids, pos2(r0.right(), r0.center().y), lane.color, x1, y + (bh - inner) / 2.0, li + 1);
             y += bh + block_gap;
         }
     });

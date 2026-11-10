@@ -200,6 +200,7 @@ pub struct PaispaceApp {
     git_info: Arc<Mutex<HashMap<PathBuf, git::Info>>>,
     children: Arc<Mutex<Vec<children::Child>>>,
     children_watch: Arc<Mutex<children::Watch>>,
+    session_cmds: children::SessionCommands,
     child_view: Option<ChildView>,
     map_window: crate::map::Window,
     map_view: crate::map::View,
@@ -225,7 +226,8 @@ impl PaispaceApp {
         git::spawn_watcher(git_dirs.clone(), git_info.clone(), wake.clone());
         let kids = Arc::new(Mutex::new(Vec::new()));
         let kids_watch = Arc::new(Mutex::new(children::Watch::default()));
-        children::spawn_watcher(kids_watch.clone(), kids.clone(), wake.clone());
+        let session_cmds: children::SessionCommands = Arc::new(Mutex::new(HashMap::new()));
+        children::spawn_watcher(kids_watch.clone(), kids.clone(), session_cmds.clone(), wake.clone());
         let mut recent = config::load_recent();
         if recent.is_empty() && workspace.is_none() {
             recent.push(tilde(&dir));
@@ -256,6 +258,7 @@ impl PaispaceApp {
             git_info,
             children: kids,
             children_watch: kids_watch,
+            session_cmds,
             child_view: None,
             map_window: crate::map::Window::All,
             map_view: crate::map::View::Graph,
@@ -630,31 +633,20 @@ impl PaispaceApp {
     }
 
     /// 終了の検出と、実行中／待ちの判定
-    /// セッションごとの「呼ばれた codex」。同じフォルダで、その子より前に始まった一番新しいセッションに付ける
-    fn children_by_session(&self) -> Vec<Vec<children::Child>> {
-        let mut out = vec![Vec::new(); self.sessions.len()];
-        for c in self.children.lock().unwrap().iter() {
-            // 子エージェントは親の会話 ID で確実に付ける
-            if let Some(parent) = &c.parent {
-                if let Some(i) = self.sessions.iter().position(|s| s.resume_id.as_deref() == Some(parent.as_str())) {
-                    out[i].push(c.clone());
-                }
-                continue;
-            }
-            let owner = self
-                .sessions
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| s.resume_id.as_deref() != Some(c.id.as_str()))
-                .filter(|(_, s)| s.started_at <= c.started + std::time::Duration::from_secs(2))
-                .filter(|(_, s)| s.view_roots().iter().any(|r| c.cwd.starts_with(r)))
-                .max_by_key(|(_, s)| s.started_at)
-                .map(|(i, _)| i);
-            if let Some(i) = owner {
-                out[i].push(c.clone());
-            }
-        }
-        out
+    /// セッションごとの呼び出しのツリー（呼ばれたものが、さらに呼んだものも）
+    fn call_tree(&self) -> Vec<Vec<children::Node>> {
+        let cmds = self.session_cmds.lock().unwrap().clone();
+        let refs: Vec<children::SessionRef> = self
+            .sessions
+            .iter()
+            .map(|s| children::SessionRef {
+                conv_id: s.resume_id.clone(),
+                roots: s.view_roots(),
+                started: s.started_at,
+                commands: s.resume_id.as_ref().and_then(|id| cmds.get(id).cloned()),
+            })
+            .collect();
+        children::build_tree(&self.children.lock().unwrap(), &refs)
     }
 
     fn tick(&mut self) {
@@ -899,7 +891,7 @@ impl PaispaceApp {
         }
 
         let info = self.git_info.lock().unwrap().clone();
-        let kids = self.children_by_session();
+        let kids = self.call_tree();
         let viewing_child = if self.side == Some(Side::Child) { self.child_view.as_ref().map(|v| v.id.clone()) } else { None };
         let now = Instant::now();
         ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -1001,29 +993,31 @@ impl PaispaceApp {
                         ui.close();
                     }
                 });
-                // 呼ばれた codex を下にぶら下げる（新しいものから5つ）
-                let list = &kids[i];
-                let skip = list.len().saturating_sub(5);
+                // 呼んだエージェントを下にぶら下げる（さらに呼んだものは字下げ。新しいものから8つ）
+                let list = children::flatten(&kids[i]);
+                let skip = list.len().saturating_sub(8);
                 if skip > 0 {
                     ui.horizontal(|ui| {
                         ui.add_space(30.0);
                         ui.label(RichText::new(format!("ほか {skip} 件")).size(10.5).color(FAINT));
                     });
                 }
-                for c in list.iter().skip(skip) {
+                for (depth, node) in list.iter().skip(skip) {
+                    let c = &node.child;
                     let id = Id::new(("child", &c.id));
                     let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
                     let on = viewing_child.as_deref() == Some(c.id.as_str());
                     let inner = Frame::new()
                         .fill(if on { CARD_SEL } else if hovered { CARD_HOVER } else { Color32::TRANSPARENT })
                         .corner_radius(6)
-                        .inner_margin(Margin { left: 22, right: 8, top: 3, bottom: 3 })
+                        .inner_margin(Margin { left: 22 + (*depth as i8).min(6) * 12, right: 8, top: 3, bottom: 3 })
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.spacing_mut().interact_size.y = 14.0;
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 5.0;
-                                ui.label(RichText::new(ui::icon::ARROW_ELBOW_DOWN_RIGHT).size(11.0).color(FAINT));
+                                let arrow = if node.guessed { ui::icon::DOTS_THREE_OUTLINE_VERTICAL } else { ui::icon::ARROW_ELBOW_DOWN_RIGHT };
+                                ui.label(RichText::new(arrow).size(11.0).color(FAINT));
                                 let (g, col) = match c.status {
                                     children::Status::Running => (ui::icon::CIRCLE_NOTCH, ACCENT),
                                     children::Status::Done => (ui::icon::CHECK, OK),
@@ -1034,7 +1028,8 @@ impl PaispaceApp {
                                 ui.add(Label::new(RichText::new(c.prompt.replace('\n', " ")).size(11.0).color(FAINT)).truncate());
                             });
                         });
-                    let r = ui.interact(inner.response.rect, id, Sense::click()).on_hover_text(clip_text(&c.prompt, 300));
+                    let how = if node.guessed { "\n\n（呼び出し元は推測：同じフォルダで、上の段が動いている間に始まった）" } else { "" };
+                    let r = ui.interact(inner.response.rect, id, Sense::click()).on_hover_text(format!("{}{how}", clip_text(&c.prompt, 300)));
                     if r.clicked() {
                         acts.push(Action::Child(c.id.clone()));
                     }
@@ -1133,7 +1128,31 @@ impl PaispaceApp {
     /// マップに並べるもの
     fn map_lanes(&self) -> Vec<crate::map::Lane> {
         use crate::map::{self, Kid, Lane, State};
-        let kids = self.children_by_session();
+        fn to_kid(n: children::Node) -> Kid {
+            let c = n.child;
+            Kid {
+                state: match c.status {
+                    children::Status::Running => State::Running,
+                    children::Status::Done => State::Done,
+                    children::Status::Stopped => State::Stopped,
+                },
+                end: (c.status != children::Status::Running).then_some(c.updated),
+                color: match c.kind {
+                    children::Kind::Codex => map::CODEX,
+                    children::Kind::Claude => map::CLAUDE,
+                    children::Kind::ClaudeSub => map::SUB,
+                },
+                id: c.id,
+                label: c.label,
+                prompt: c.prompt,
+                last: c.last,
+                start: c.started,
+                tools: c.tools,
+                guessed: n.guessed,
+                kids: n.kids.into_iter().map(to_kid).collect(),
+            }
+        }
+        let kids = self.call_tree();
         self.sessions
             .iter()
             .zip(kids)
@@ -1159,25 +1178,7 @@ impl PaispaceApp {
                     state,
                     kids: ks
                         .into_iter()
-                        .map(|c| Kid {
-                            state: match c.status {
-                                children::Status::Running => State::Running,
-                                children::Status::Done => State::Done,
-                                children::Status::Stopped => State::Stopped,
-                            },
-                            end: (c.status != children::Status::Running).then_some(c.updated),
-                            color: match c.kind {
-                                children::Kind::Codex => map::CODEX,
-                                children::Kind::Claude => map::CLAUDE,
-                                children::Kind::ClaudeSub => map::SUB,
-                            },
-                            id: c.id,
-                            label: c.label,
-                            prompt: c.prompt,
-                            last: c.last,
-                            start: c.started,
-                            tools: c.tools,
-                        })
+                        .map(to_kid)
                         .collect(),
                 }
             })

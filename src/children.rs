@@ -40,6 +40,8 @@ pub struct Child {
     pub label: String,
     /// 子エージェントなら親の会話の ID（そのセッションに確実に付ける）
     pub parent: Option<String>,
+    /// 親が子エージェントや呼ばれた claude なら、その ID（記録に書いてあるので確か）
+    pub parent_agent: Option<String>,
     pub file: PathBuf,
     pub cwd: PathBuf,
     pub started: SystemTime,
@@ -49,6 +51,8 @@ pub struct Child {
     pub last: String,
     pub status: Status,
     pub tools: usize,
+    /// 実行したコマンド（ほかのエージェントを呼んだかどうかの手がかり）
+    pub commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -224,6 +228,7 @@ pub fn scan_codex(root: &Path, since: SystemTime, cache: &mut HashMap<PathBuf, (
                     kind: Kind::Codex,
                     label: "codex".into(),
                     parent: None,
+                    parent_agent: None,
                     file: p.clone(),
                     cwd: m.cwd,
                     started: m.started,
@@ -232,6 +237,7 @@ pub fn scan_codex(root: &Path, since: SystemTime, cache: &mut HashMap<PathBuf, (
                     last: steps.iter().rev().find(|s| matches!(s.kind, StepKind::Say | StepKind::Answer)).map(|s| s.text.clone()).unwrap_or_default(),
                     status: if done { Status::Done } else if fresh { Status::Running } else { Status::Stopped },
                     tools: steps.iter().filter(|s| s.kind == StepKind::Tool).count(),
+                    commands: tool_texts(&steps),
                 }
             });
             // 動いている間は、止まったかどうかを時間で判定し直すので覚えない
@@ -376,6 +382,7 @@ fn summarize(kind: Kind, label: String, id: String, parent: Option<String>, file
         kind,
         label,
         parent,
+        parent_agent: None,
         file: file.to_path_buf(),
         cwd: cwd.to_path_buf(),
         started,
@@ -384,6 +391,7 @@ fn summarize(kind: Kind, label: String, id: String, parent: Option<String>, file
         last: steps.iter().rev().find(|s| matches!(s.kind, StepKind::Say | StepKind::Answer)).map(|s| s.text.clone()).unwrap_or_default(),
         status: if done { Status::Done } else if fresh { Status::Running } else { Status::Stopped },
         tools: steps.iter().filter(|s| s.kind == StepKind::Tool).count(),
+        commands: tool_texts(&steps),
     }
 }
 
@@ -437,29 +445,179 @@ pub fn scan_claude(root: &Path, watch: &Watch, cache: &mut Cache) -> Vec<Child> 
     }
     // 子エージェント: 親の会話 ID のフォルダの中
     for (sid, cwd) in &watch.claude_ids {
-        let dir = claude_project_dir(root, cwd).join(sid).join("subagents");
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.extension().is_none_or(|x| x != "jsonl") {
+        out.extend(scan_subagents(root, cwd, sid, Some(sid.clone()), None, cache));
+    }
+    // 呼ばれた claude がさらに立てた子エージェント
+    let called: Vec<(String, PathBuf)> = out.iter().filter(|c| c.kind == Kind::Claude).map(|c| (c.id.clone(), c.cwd.clone())).collect();
+    for (cid, cwd) in called {
+        out.extend(scan_subagents(root, &cwd, &cid, None, Some(cid.clone()), cache));
+    }
+    out
+}
+
+/// 会話 conv の子エージェントを集める。owner はセッションの会話 ID、default_parent は親が呼ばれた claude のとき
+fn scan_subagents(root: &Path, cwd: &Path, conv: &str, owner: Option<String>, default_parent: Option<String>, cache: &mut Cache) -> Vec<Child> {
+    let mut out = Vec::new();
+    let dir = claude_project_dir(root, cwd).join(conv).join("subagents");
+    let Ok(rd) = std::fs::read_dir(&dir) else { return out };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.extension().is_none_or(|x| x != "jsonl") {
+            continue;
+        }
+        let Ok(md) = e.metadata() else { continue };
+        let created = md.created().or_else(|_| md.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+        let meta_path = p.with_extension("meta.json");
+        let meta_mtime = std::fs::metadata(&meta_path).and_then(|m| m.modified()).ok();
+        let mtime = md.modified().unwrap_or(created).max(meta_mtime.unwrap_or(SystemTime::UNIX_EPOCH));
+        let id = p.file_stem().map(|s| s.to_string_lossy().trim_start_matches("agent-").to_string()).unwrap_or_default();
+        let c = cached(cache, &p, mtime, || {
+            let meta: Value = std::fs::read_to_string(&meta_path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+            let label = meta.get("agentType").and_then(|a| a.as_str()).unwrap_or("subagent").to_string();
+            let finished = meta.get("finished").and_then(|f| f.as_bool());
+            let desc = meta.get("description").and_then(|d| d.as_str()).map(str::to_string);
+            let mut c = summarize(Kind::ClaudeSub, label, id.clone(), owner.clone(), &p, cwd, created, mtime, finished, desc);
+            // 子エージェントがさらに立てた子は、親の子エージェントの ID が書いてある
+            c.parent_agent = meta.get("parentAgentId").and_then(|a| a.as_str()).map(str::to_string).or_else(|| default_parent.clone());
+            Some(c)
+        });
+        out.extend(c);
+    }
+    out
+}
+
+/// 呼び出しのツリーの1つ
+#[derive(Debug, Clone)]
+pub struct Node {
+    pub child: Child,
+    /// 親を推測でつないだ（記録に書いていない）
+    pub guessed: bool,
+    pub kids: Vec<Node>,
+}
+
+/// ツリーを作るためのセッションの情報
+pub struct SessionRef {
+    pub conv_id: Option<String>,
+    pub roots: Vec<PathBuf>,
+    pub started: SystemTime,
+    /// そのセッションが実行したコマンド（claude なら記録から読める。読めないものは None）
+    pub commands: Option<Vec<String>>,
+}
+
+fn tool_texts(steps: &[Step]) -> Vec<String> {
+    steps.iter().filter(|s| s.kind == StepKind::Tool).map(|s| s.text.chars().take(600).collect()).collect()
+}
+
+/// commands が c を呼んだ手がかりの強さ。2: 頼んだ文そのものがある / 1: エージェント名だけ / 0: なし
+fn evidence(commands: &[String], c: &Child) -> u8 {
+    let prompt: String = c.prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    let snippet: String = prompt.chars().take(16).collect();
+    if snippet.chars().count() >= 6 && commands.iter().any(|cmd| cmd.split_whitespace().collect::<Vec<_>>().join(" ").contains(&snippet)) {
+        return 2;
+    }
+    let name = match c.kind {
+        Kind::Codex => "codex",
+        Kind::Claude | Kind::ClaudeSub => "claude",
+    };
+    if commands.iter().any(|cmd| cmd.contains(name)) { 1 } else { 0 }
+}
+
+/// 子をセッションごとのツリーにする。
+/// 記録に親が書いてあればそれに。なければ、同じフォルダで動いていた候補のうち、
+/// 実行したコマンドに「その子を呼んだ手がかり」があるものの下に付ける
+pub fn build_tree(all: &[Child], sessions: &[SessionRef]) -> Vec<Vec<Node>> {
+    #[derive(Clone)]
+    enum Up {
+        Session(usize),
+        Child(String),
+    }
+    let ids: std::collections::HashSet<&str> = all.iter().map(|c| c.id.as_str()).collect();
+    let session_of_conv = |id: &str| sessions.iter().position(|s| s.conv_id.as_deref() == Some(id));
+    let mut up: HashMap<String, (Up, bool)> = HashMap::new();
+    for c in all {
+        if let Some(pid) = c.parent_agent.as_deref().filter(|p| ids.contains(p) && *p != c.id) {
+            up.insert(c.id.clone(), (Up::Child(pid.to_string()), false));
+            continue;
+        }
+        if let Some(i) = c.parent.as_deref().and_then(session_of_conv) {
+            up.insert(c.id.clone(), (Up::Session(i), false));
+            continue;
+        }
+        if c.parent.is_some() {
+            continue; // 親のセッションがもういない
+        }
+        // その子が始まったとき、同じフォルダで動いていた候補のうち、実際にその子を呼んだ手がかりがあるもの。
+        // 頼んだ文そのものがコマンドにあれば確か（実線）、エージェント名だけなら推測（点線）
+        let grace = Duration::from_secs(2);
+        let mut best: Option<(u8, SystemTime, Up)> = None;
+        let mut consider = |score: u8, started: SystemTime, up: Up| {
+            if best.as_ref().is_none_or(|(s, t, _)| score > *s || (score == *s && started > *t)) {
+                best = Some((score, started, up));
+            }
+        };
+        for k in all.iter().filter(|k| k.id != c.id && k.started < c.started && c.cwd.starts_with(&k.cwd)) {
+            if k.status == Status::Running || k.updated + grace >= c.started {
+                let e = evidence(&k.commands, c);
+                if e > 0 {
+                    consider(e, k.started, Up::Child(k.id.clone()));
+                }
+            }
+        }
+        for (i, s) in sessions.iter().enumerate() {
+            if s.conv_id.as_deref() == Some(c.id.as_str()) || s.started > c.started + grace || !s.roots.iter().any(|r| c.cwd.starts_with(r)) {
                 continue;
             }
-            let Ok(md) = e.metadata() else { continue };
-            let created = md.created().or_else(|_| md.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
-            let meta_path = p.with_extension("meta.json");
-            let meta_mtime = std::fs::metadata(&meta_path).and_then(|m| m.modified()).ok();
-            let mtime = md.modified().unwrap_or(created).max(meta_mtime.unwrap_or(SystemTime::UNIX_EPOCH));
-            let id = p.file_stem().map(|s| s.to_string_lossy().trim_start_matches("agent-").to_string()).unwrap_or_default();
-            let c = cached(cache, &p, mtime, || {
-                let meta: Value = std::fs::read_to_string(&meta_path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
-                let label = meta.get("agentType").and_then(|a| a.as_str()).unwrap_or("subagent").to_string();
-                let finished = meta.get("finished").and_then(|f| f.as_bool());
-                let desc = meta.get("description").and_then(|d| d.as_str()).map(str::to_string);
-                Some(summarize(Kind::ClaudeSub, label, id.clone(), Some(sid.clone()), &p, cwd, created, mtime, finished, desc))
-            });
-            out.extend(c);
+            match &s.commands {
+                // 記録が読めるセッションは、手がかりがあるときだけ
+                Some(cmds) => {
+                    let e = evidence(cmds, c);
+                    if e > 0 {
+                        consider(e, s.started, Up::Session(i));
+                    }
+                }
+                // 読めないセッション（シェルなど）は、手がかりなしの候補
+                None => consider(0, s.started, Up::Session(i)),
+            }
+        }
+        if let Some((score, _, u)) = best {
+            let guessed = score < 2 && matches!(u, Up::Child(_));
+            up.insert(c.id.clone(), (u, guessed));
         }
     }
+    fn grow(id: &str, all: &[Child], up: &HashMap<String, (Up, bool)>, depth: usize) -> Vec<Node> {
+        if depth > 16 {
+            return Vec::new(); // 念のため（記録が壊れて輪になっていても止まる）
+        }
+        let mut v: Vec<Node> = all
+            .iter()
+            .filter(|c| matches!(up.get(&c.id), Some((Up::Child(p), _)) if p == id))
+            .map(|c| Node { child: c.clone(), guessed: up[&c.id].1, kids: grow(&c.id, all, up, depth + 1) })
+            .collect();
+        v.sort_by_key(|n| n.child.started);
+        v
+    }
+    let mut out = vec![Vec::new(); sessions.len()];
+    for c in all {
+        if let Some((Up::Session(i), g)) = up.get(&c.id) {
+            out[*i].push(Node { child: c.clone(), guessed: *g, kids: grow(&c.id, all, &up, 1) });
+        }
+    }
+    for v in &mut out {
+        v.sort_by_key(|n| n.child.started);
+    }
+    out
+}
+
+/// ツリーを上から順に並べる（深さつき）
+pub fn flatten(nodes: &[Node]) -> Vec<(usize, &Node)> {
+    fn go<'a>(n: &'a [Node], d: usize, out: &mut Vec<(usize, &'a Node)>) {
+        for x in n {
+            out.push((d, x));
+            go(&x.kids, d + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    go(nodes, 0, &mut out);
     out
 }
 
@@ -475,10 +633,14 @@ pub struct Watch {
 }
 
 /// 裏で2秒ごとに集め直す
-pub fn spawn_watcher(watch: Arc<Mutex<Watch>>, out: Arc<Mutex<Vec<Child>>>, wake: Wake) {
+/// paispace が開いた claude のセッションが実行したコマンド（会話 ID → コマンド）
+pub type SessionCommands = Arc<Mutex<HashMap<String, Vec<String>>>>;
+
+pub fn spawn_watcher(watch: Arc<Mutex<Watch>>, out: Arc<Mutex<Vec<Child>>>, session_cmds: SessionCommands, wake: Wake) {
     std::thread::spawn(move || {
         let mut codex_cache = HashMap::new();
         let mut claude_cache = HashMap::new();
+        let mut cmd_cache: HashMap<PathBuf, (SystemTime, Vec<String>)> = HashMap::new();
         let croot = codex_root();
         let claude = claude_root();
         loop {
@@ -487,6 +649,22 @@ pub fn spawn_watcher(watch: Arc<Mutex<Watch>>, out: Arc<Mutex<Vec<Child>>>, wake
                 let mut found = scan_codex(&croot, since, &mut codex_cache);
                 found.extend(scan_claude(&claude, &w, &mut claude_cache));
                 found.sort_by_key(|c| c.started);
+                // セッション自身のコマンド（どの子を呼んだかの手がかり）
+                let mut cmds = HashMap::new();
+                for (sid, cwd) in &w.claude_ids {
+                    let f = claude_project_dir(&claude, cwd).join(format!("{sid}.jsonl"));
+                    let Some(m) = std::fs::metadata(&f).and_then(|m| m.modified()).ok() else { continue };
+                    let list = match cmd_cache.get(&f) {
+                        Some((t, l)) if *t == m => l.clone(),
+                        _ => {
+                            let l = tool_texts(&read_claude_steps(&f).0);
+                            cmd_cache.insert(f.clone(), (m, l.clone()));
+                            l
+                        }
+                    };
+                    cmds.insert(sid.clone(), list);
+                }
+                *session_cmds.lock().unwrap() = cmds;
                 let changed = {
                     let mut cur = out.lock().unwrap();
                     let same = cur.len() == found.len()
@@ -545,6 +723,77 @@ mod tests {
         // 始める前のものは拾わない
         assert!(scan_codex(&root, SystemTime::now() + Duration::from_secs(60), &mut HashMap::new()).is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn child(id: &str, cwd: &str, start: u64, end: u64, status: Status) -> Child {
+        let t = |s: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000 + s);
+        Child {
+            id: id.into(),
+            kind: Kind::Codex,
+            label: id.into(),
+            parent: None,
+            parent_agent: None,
+            file: PathBuf::new(),
+            cwd: cwd.into(),
+            started: t(start),
+            updated: t(end),
+            prompt: String::new(),
+            last: String::new(),
+            status,
+            tools: 0,
+            commands: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn builds_call_tree() {
+        let t = |s: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000 + s);
+        let sessions = vec![
+            // claude のセッション（記録が読める。子エージェントしか立てていない）
+            SessionRef { conv_id: Some("conv-a".into()), roots: vec!["/w".into()], started: t(0), commands: Some(vec!["Agent  数えて".into()]) },
+            // シェルのセッション（記録が読めない）
+            SessionRef { conv_id: None, roots: vec!["/w".into()], started: t(1), commands: None },
+        ];
+        // a: 子エージェント s1 → その子 s2（記録に親が書いてある）
+        let mut s1 = child("s1", "/w", 10, 50, Status::Done);
+        s1.kind = Kind::ClaudeSub;
+        s1.parent = Some("conv-a".into());
+        s1.commands = vec!["Bash  ls app".into()];
+        let mut s2 = child("s2", "/w", 20, 30, Status::Done);
+        s2.kind = Kind::ClaudeSub;
+        s2.parent = Some("conv-a".into());
+        s2.parent_agent = Some("s1".into());
+        // シェルから claude -p（y）。y が codex exec（z）を、頼んだ文ごと呼んだ
+        let mut y = child("y", "/w", 12, 40, Status::Done);
+        y.kind = Kind::Claude;
+        y.prompt = "Bash で codex を呼んで".into();
+        y.commands = vec!["Bash  codex exec --skip-git-repo-check \"web フォルダ直下の項目数を数えて\"".into()];
+        let mut z = child("z", "/w", 25, 30, Status::Done);
+        z.prompt = "web フォルダ直下の項目数を数えて".into();
+        // y の中で名前だけ出てくる codex（推測）
+        let mut y2 = child("y2", "/w", 26, 45, Status::Done);
+        y2.kind = Kind::Claude;
+        y2.commands = vec!["Bash  codex exec --help".into()];
+        let mut z2 = child("z2", "/w", 30, 35, Status::Done);
+        z2.prompt = "まったく別の頼みごと".into();
+        let tree = build_tree(&[s1, s2, y, z, y2, z2], &sessions);
+
+        // claude のセッションには子エージェントだけ。s1 が同じ時間に動いていても z は付かない
+        assert_eq!(tree[0].len(), 1);
+        assert_eq!(tree[0][0].child.id, "s1");
+        assert_eq!(tree[0][0].kids.len(), 1);
+        assert_eq!(tree[0][0].kids[0].child.id, "s2");
+        assert!(!tree[0][0].kids[0].guessed);
+
+        // シェルのセッションに y と y2。z は頼んだ文があるので y の下（実線）、z2 は名前だけなので y2 の下（点線）
+        let ids: Vec<&str> = tree[1].iter().map(|n| n.child.id.as_str()).collect();
+        assert_eq!(ids, vec!["y", "y2"]);
+        assert_eq!(tree[1][0].kids[0].child.id, "z");
+        assert!(!tree[1][0].kids[0].guessed);
+        assert_eq!(tree[1][1].kids[0].child.id, "z2");
+        assert!(tree[1][1].kids[0].guessed);
+        let flat: Vec<(usize, &str)> = flatten(&tree[1]).into_iter().map(|(d, n)| (d, n.child.id.as_str())).collect();
+        assert_eq!(flat, vec![(0, "y"), (1, "z"), (0, "y2"), (1, "z2")]);
     }
 
     #[test]
