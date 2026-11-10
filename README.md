@@ -14,6 +14,7 @@
 - 新しいセッション（⌘N）: プロジェクトの一覧から選んで Enter ですぐ始まる。文字を打つと絞り込み、Tab でエージェントを切り替え
 - VSCode を読む（書き込みはしない）: `.code-workspace` のフォルダと、VSCode・Cursor・Windsurf で最近開いたフォルダ／ワークスペースを新規作成の一覧に並べる。`paispace work.code-workspace` で直接開ける。新規作成の「ワークスペースを開く…」（⌘O）でファイルを選ぶこともでき、選んだものは設定に覚える。複数フォルダのワークスペースは「（ワークスペース）」の項目で始めると、VSCode と同じくそのフォルダだけが見える（ツリー・⌘P・検索・差分はフォルダごと、エージェントは1つ目のフォルダで起動して残りを --add-dir で渡す）
 - セッションを覚える: 閉じて開き直すと、サイドバーの「前回のセッション」から再開できる（開いていたファイルのタブも戻る）。claude は `--session-id` で決めた会話を `--resume` で、codex は `~/.codex/sessions` から見つけた会話を `codex resume` で、続きから戻る。そのほかは同じフォルダで開き直す。覚えているのは `~/.config/paispace/sessions.json`
+- ほかのエージェントに呼ばれた codex が見える: claude などがコマンドで `codex exec` を呼ぶと、codex 自身の記録（`~/.codex/sessions`）から拾って、呼んだセッションのカードの下にぶら下げる。クリックすると、頼まれたこと・使ったコマンドと結果・答えを右のパネルで見られる（動いている間も更新）
 - 初めて起動したときに設定画面（あとから ⌘,）。プロジェクトの置き場、入っているエージェント（自動で探す）、エディタを選ぶ
 - お節介はしない: フックを入れない、エージェントの設定に触らない、worktree を勝手に消さない
 
@@ -85,4 +86,4 @@ cmd = ""                      # 空ならログインシェル
 
 ## 確認用
 
-`PAISPACE_SHOT=out.png PAISPACE_SHOT_SECS=4 paispace -a shell` で、4秒後に自分の画面を PNG に書き出して終わる（`PAISPACE_SHOT_UI=new|diff|files|setup|ask|quick|search|resume` でその画面を開いた状態に、`PAISPACE_SHOT_OPEN=src/main.rs` でファイルを開いた状態に）。`PAISPACE_CONFIG_DIR` で設定の置き場を変えられる。
+`PAISPACE_SHOT=out.png PAISPACE_SHOT_SECS=4 paispace -a shell` で、4秒後に自分の画面を PNG に書き出して終わる（`PAISPACE_SHOT_UI=new|diff|files|setup|ask|quick|search|resume|child` でその画面を開いた状態に、`PAISPACE_SHOT_OPEN=src/main.rs` でファイルを開いた状態に）。`PAISPACE_CONFIG_DIR` で設定の置き場を変えられる。

@@ -1,4 +1,5 @@
 mod app;
+mod children;
 mod config;
 mod editor;
 mod files;

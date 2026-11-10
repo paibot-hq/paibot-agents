@@ -10,6 +10,7 @@ use eframe::egui::{
     ScrollArea, Sense, Stroke, TextEdit, Ui, vec2,
 };
 
+use crate::children;
 use crate::config::{self, Agent, Config};
 use crate::resume::{self, Saved};
 use crate::editor::{self, Doc, DocAction};
@@ -32,6 +33,35 @@ enum Side {
     Files,
     Diff,
     Search,
+    /// ほかのエージェントに呼ばれた codex の中身
+    Child,
+}
+
+/// 右のパネルで見ている「呼ばれた codex」
+struct ChildView {
+    id: String,
+    file: PathBuf,
+    steps: Vec<children::Step>,
+    done: bool,
+    mtime: Option<std::time::SystemTime>,
+}
+
+impl ChildView {
+    fn open(c: &children::Child) -> Self {
+        let mut v = Self { id: c.id.clone(), file: c.file.clone(), steps: Vec::new(), done: false, mtime: None };
+        v.refresh();
+        v
+    }
+
+    fn refresh(&mut self) {
+        let m = std::fs::metadata(&self.file).and_then(|m| m.modified()).ok();
+        if m != self.mtime || self.mtime.is_none() {
+            let (steps, done) = children::read_steps(&self.file);
+            self.steps = steps;
+            self.done = done;
+            self.mtime = m;
+        }
+    }
 }
 
 enum Confirm {
@@ -132,6 +162,7 @@ enum Action {
     Resume(usize),
     ResumeAll,
     Forget(usize),
+    Child(String),
 }
 
 pub struct PaispaceApp {
@@ -160,6 +191,9 @@ pub struct PaispaceApp {
     recent: Vec<String>,
     git_dirs: Arc<Mutex<Vec<PathBuf>>>,
     git_info: Arc<Mutex<HashMap<PathBuf, git::Info>>>,
+    children: Arc<Mutex<Vec<children::Child>>>,
+    children_since: Arc<Mutex<Option<std::time::SystemTime>>>,
+    child_view: Option<ChildView>,
     wake: Wake,
     allow_close: bool,
     shot: Option<crate::shot::Shot>,
@@ -180,6 +214,9 @@ impl PaispaceApp {
         let git_dirs = Arc::new(Mutex::new(Vec::new()));
         let git_info = Arc::new(Mutex::new(HashMap::new()));
         git::spawn_watcher(git_dirs.clone(), git_info.clone(), wake.clone());
+        let kids = Arc::new(Mutex::new(Vec::new()));
+        let kids_since = Arc::new(Mutex::new(None));
+        children::spawn_watcher(kids_since.clone(), kids.clone(), wake.clone());
         let mut recent = config::load_recent();
         if recent.is_empty() && workspace.is_none() {
             recent.push(tilde(&dir));
@@ -208,6 +245,9 @@ impl PaispaceApp {
             recent,
             git_dirs,
             git_info,
+            children: kids,
+            children_since: kids_since,
+            child_view: None,
             wake,
             allow_close: false,
             shot: crate::shot::Shot::from_env(),
@@ -545,6 +585,14 @@ impl PaispaceApp {
                     }
                 }
             }
+            Action::Child(id) => {
+                if self.side == Some(Side::Child) && self.child_view.as_ref().is_some_and(|v| v.id == id) {
+                    self.side = None;
+                } else if let Some(c) = self.children.lock().unwrap().iter().find(|c| c.id == id) {
+                    self.child_view = Some(ChildView::open(c));
+                    self.side = Some(Side::Child);
+                }
+            }
             Action::Forget(i) => {
                 if i < self.dormant.len() {
                     self.dormant.remove(i);
@@ -561,7 +609,30 @@ impl PaispaceApp {
     }
 
     /// 終了の検出と、実行中／待ちの判定
+    /// セッションごとの「呼ばれた codex」。同じフォルダで、その子より前に始まった一番新しいセッションに付ける
+    fn children_by_session(&self) -> Vec<Vec<children::Child>> {
+        let mut out = vec![Vec::new(); self.sessions.len()];
+        for c in self.children.lock().unwrap().iter() {
+            let owner = self
+                .sessions
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.resume_id.as_deref() != Some(c.id.as_str()))
+                .filter(|(_, s)| s.started_at <= c.started + std::time::Duration::from_secs(2))
+                .filter(|(_, s)| s.view_roots().iter().any(|r| c.cwd.starts_with(r)))
+                .max_by_key(|(_, s)| s.started_at)
+                .map(|(i, _)| i);
+            if let Some(i) = owner {
+                out[i].push(c.clone());
+            }
+        }
+        out
+    }
+
     fn tick(&mut self) {
+        // 呼ばれた codex を探す範囲（動いているセッションのうち一番古い開始時刻から）
+        let since = self.sessions.iter().filter(|s| s.exit.is_none()).map(|s| s.started_at).min();
+        *self.children_since.lock().unwrap() = since;
         let now = Instant::now();
         let idle = Duration::from_secs_f64(self.cfg.idle_secs.max(0.2));
         let min_busy = Duration::from_secs_f64(self.cfg.min_busy_secs.max(0.0));
@@ -788,6 +859,8 @@ impl PaispaceApp {
         }
 
         let info = self.git_info.lock().unwrap().clone();
+        let kids = self.children_by_session();
+        let viewing_child = if self.side == Some(Side::Child) { self.child_view.as_ref().map(|v| v.id.clone()) } else { None };
         let now = Instant::now();
         ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for (i, s) in self.sessions.iter().enumerate() {
@@ -888,6 +961,47 @@ impl PaispaceApp {
                         ui.close();
                     }
                 });
+                // 呼ばれた codex を下にぶら下げる（新しいものから5つ）
+                let list = &kids[i];
+                let skip = list.len().saturating_sub(5);
+                if skip > 0 {
+                    ui.horizontal(|ui| {
+                        ui.add_space(30.0);
+                        ui.label(RichText::new(format!("ほか {skip} 件")).size(10.5).color(FAINT));
+                    });
+                }
+                for c in list.iter().skip(skip) {
+                    let id = Id::new(("child", &c.id));
+                    let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
+                    let on = viewing_child.as_deref() == Some(c.id.as_str());
+                    let inner = Frame::new()
+                        .fill(if on { CARD_SEL } else if hovered { CARD_HOVER } else { Color32::TRANSPARENT })
+                        .corner_radius(6)
+                        .inner_margin(Margin { left: 22, right: 8, top: 3, bottom: 3 })
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.spacing_mut().interact_size.y = 14.0;
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 5.0;
+                                ui.label(RichText::new(ui::icon::ARROW_ELBOW_DOWN_RIGHT).size(11.0).color(FAINT));
+                                let (g, col) = match c.status {
+                                    children::Status::Running => (ui::icon::CIRCLE_NOTCH, ACCENT),
+                                    children::Status::Done => (ui::icon::CHECK, OK),
+                                    children::Status::Stopped => (ui::icon::WARNING, WAITING),
+                                };
+                                ui.label(RichText::new(g).size(11.0).color(col));
+                                ui.label(RichText::new("codex").font(ui::bold(11.0)).color(MUTED));
+                                ui.add(Label::new(RichText::new(c.prompt.replace('\n', " ")).size(11.0).color(FAINT)).truncate());
+                            });
+                        });
+                    let r = ui.interact(inner.response.rect, id, Sense::click()).on_hover_text(clip_text(&c.prompt, 300));
+                    if r.clicked() {
+                        acts.push(Action::Child(c.id.clone()));
+                    }
+                    if c.status == children::Status::Running {
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+                    }
+                }
                 ui.add_space(2.0);
             }
         });
@@ -971,6 +1085,84 @@ impl PaispaceApp {
             });
         });
         (acts, tab_act)
+    }
+
+    fn child_panel(&mut self, ui: &mut Ui) {
+        let Some(v) = &mut self.child_view else {
+            self.side = None;
+            return;
+        };
+        v.refresh();
+        let running = !v.done && v.mtime.is_some_and(|m| m.elapsed().unwrap_or_default() < std::time::Duration::from_secs(90));
+        let mut close = false;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(ui::icon::ROBOT).size(15.0).color(ACCENT));
+            ui.label(RichText::new("codex").font(ui::bold(13.5)).color(TEXT));
+            ui.label(RichText::new("ほかのエージェントから呼ばれた").size(11.0).color(FAINT));
+            let (t, c) = if v.done { ("終わった", OK) } else if running { ("動いています", ACCENT) } else { ("途中で止まった", WAITING) };
+            ui.label(RichText::new(t).size(11.0).color(c));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui::icon_button(ui, ui::icon::X, "閉じる", false).clicked() {
+                    close = true;
+                }
+                if ui::icon_button(ui, ui::icon::FILE_TEXT, "記録のファイルを開く", false).clicked() {
+                    let _ = std::process::Command::new("open").arg("-R").arg(&v.file).status();
+                }
+            });
+        });
+        ui.add_space(6.0);
+        if running {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(700));
+        }
+        let mono = FontId::monospace(11.5);
+        ScrollArea::vertical().id_salt("child-steps").auto_shrink([false, false]).stick_to_bottom(running).show(ui, |ui| {
+            for (n, st) in v.steps.iter().enumerate() {
+                match st.kind {
+                    children::StepKind::Prompt => {
+                        ui.label(RichText::new("頼まれたこと").size(11.0).color(FAINT));
+                        Frame::new().fill(RAISED).corner_radius(8).inner_margin(Margin::same(10)).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.add(Label::new(RichText::new(&st.text).size(12.5).color(TEXT)).wrap());
+                        });
+                        ui.add_space(8.0);
+                    }
+                    children::StepKind::Say => {
+                        ui.add(Label::new(RichText::new(&st.text).size(12.5).color(TERM_FG)).wrap());
+                        ui.add_space(6.0);
+                    }
+                    children::StepKind::Tool => {
+                        let (name, rest) = st.text.split_once("  ").unwrap_or((st.text.as_str(), ""));
+                        egui::CollapsingHeader::new(RichText::new(format!("{}  {name}  {}", ui::icon::TERMINAL, clip_text(rest.lines().next().unwrap_or(""), 60))).size(11.5).color(MUTED))
+                            .id_salt(("tool", n))
+                            .show(ui, |ui| {
+                                ui.add(Label::new(RichText::new(rest).font(mono.clone()).color(TERM_FG)).wrap());
+                            });
+                    }
+                    children::StepKind::Output => {
+                        egui::CollapsingHeader::new(RichText::new(format!("{}  結果  {}", ui::icon::ARROW_BEND_DOWN_RIGHT, clip_text(st.text.lines().next().unwrap_or(""), 60))).size(11.0).color(FAINT))
+                            .id_salt(("out", n))
+                            .show(ui, |ui| {
+                                ui.add(Label::new(RichText::new(&st.text).font(mono.clone()).color(MUTED)).wrap());
+                            });
+                        ui.add_space(4.0);
+                    }
+                    children::StepKind::Answer => {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("答え").size(11.0).color(FAINT));
+                        Frame::new().fill(OK.gamma_multiply(0.08)).stroke(Stroke::new(1.0, OK.gamma_multiply(0.35))).corner_radius(8).inner_margin(Margin::same(10)).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.add(Label::new(RichText::new(&st.text).size(12.5).color(TEXT)).wrap());
+                        });
+                    }
+                }
+            }
+            if v.steps.is_empty() {
+                ui.label(RichText::new("まだ記録がありません").color(FAINT));
+            }
+        });
+        if close {
+            self.side = None;
+        }
     }
 
     fn diff_panel(&mut self, ui: &mut Ui) {
@@ -1248,6 +1440,13 @@ impl eframe::App for PaispaceApp {
 
         self.shortcuts(ctx);
         self.tick();
+        // 確認用: 呼ばれた codex が見つかったら、その中身を開く
+        if self.shot.as_ref().is_some_and(|s| s.ui == "child") && self.side.is_none() {
+            let first = self.children.lock().unwrap().first().map(|c| c.id.clone());
+            if let Some(id) = first {
+                self.apply(Action::Child(id));
+            }
+        }
 
         let mut acts = Vec::new();
         egui::SidePanel::left("sessions")
@@ -1267,6 +1466,7 @@ impl eframe::App for PaispaceApp {
                 .frame(Frame::new().fill(SIDEBAR_BG).inner_margin(Margin { left: 12, right: 12, top: 6, bottom: 10 }).stroke(Stroke::new(1.0, HAIRLINE)))
                 .show(ctx, |ui| match side {
                     Side::Diff => self.diff_panel(ui),
+                    Side::Child => self.child_panel(ui),
                     Side::Files | Side::Search => {
                         let cwd = self.sessions[self.sel].cwd.clone();
                         let mut close = false;
@@ -1449,6 +1649,11 @@ fn tab(ui: &mut Ui, on: bool, text: &str, tint: Option<Color32>, dirty: bool) ->
         .corner_radius(6.0)
         .min_size(vec2(0.0, 28.0));
     ui.add(b)
+}
+
+fn clip_text(s: &str, n: usize) -> String {
+    let t: String = s.chars().take(n).collect();
+    if t.chars().count() < s.chars().count() { format!("{t}…") } else { t }
 }
 
 fn elapsed(secs: u64) -> String {

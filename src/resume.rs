@@ -92,6 +92,9 @@ struct CodexLine {
 struct CodexMeta {
     id: String,
     cwd: String,
+    /// "exec" はほかのエージェントや拡張がコマンドで呼んだもの（自分で開いた codex ではない）
+    #[serde(default)]
+    source: Option<String>,
 }
 
 /// そのフォルダで started より後に始まった codex の会話の ID（ほかのセッションが使っているものは除く）
@@ -127,7 +130,7 @@ fn find_codex_id_in(root: &Path, cwd: &Path, started: SystemTime, taken: &[Strin
                 continue;
             }
             let Ok(line) = serde_json::from_str::<CodexLine>(&first) else { continue };
-            if Path::new(&line.payload.cwd) != cwd || taken.contains(&line.payload.id) {
+            if line.payload.source.as_deref() == Some("exec") || Path::new(&line.payload.cwd) != cwd || taken.contains(&line.payload.id) {
                 continue;
             }
             if best.as_ref().is_none_or(|(t, _)| created < *t) {
@@ -240,6 +243,9 @@ mod tests {
         let line = |id: &str, cwd: &str| format!(r#"{{"type":"session_meta","payload":{{"id":"{id}","cwd":"{cwd}"}}}}"#);
         std::fs::write(day.join("rollout-a.jsonl"), line("other-dir", "/x/other") + "\n").unwrap();
         std::fs::write(day.join("rollout-b.jsonl"), line("mine", "/x/proj") + "\n").unwrap();
+        // claude などが codex exec で呼んだものは選ばない
+        let exec = r#"{"type":"session_meta","payload":{"id":"called","cwd":"/x/proj","source":"exec"}}"#;
+        std::fs::write(day.join("rollout-0.jsonl"), format!("{exec}\n")).unwrap();
         let cwd = Path::new("/x/proj");
         assert_eq!(find_codex_id_in(&root, cwd, started, &[]), Some("mine".into()));
         // ほかのセッションが使っている ID は選ばない
