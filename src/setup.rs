@@ -32,6 +32,9 @@ pub struct Setup {
     editors: Vec<String>,
     notify: bool,
     font_size: f32,
+    workspaces: Vec<String>,
+    vscode_recent: bool,
+    found_ws: Vec<(String, usize)>,
     base: Config,
     detected: Arc<Mutex<Option<Detected>>>,
     applied_detection: bool,
@@ -72,6 +75,9 @@ impl Setup {
             editor: cfg.editor_app.clone(),
             editors: Vec::new(),
             notify: cfg.notify,
+            workspaces: cfg.workspaces.clone(),
+            vscode_recent: cfg.vscode_recent,
+            found_ws: Vec::new(),
             font_size: cfg.font_size,
             base: cfg.clone(),
             detected,
@@ -217,6 +223,55 @@ impl Setup {
                 }
 
                 ui.add_space(18.0);
+                section(ui, "VSCode", "VSCode のワークスペースや、最近開いたフォルダも新しいセッションの一覧に並べます（読むだけです）。");
+                ui.checkbox(&mut self.vscode_recent, "VSCode・Cursor などで最近開いたフォルダとワークスペースを並べる");
+                if self.found_ws.is_empty() {
+                    let mut dirs = Vec::new();
+                    for r in &self.roots {
+                        let d = expand(r);
+                        if let Some(p) = d.parent() {
+                            dirs.push(p.to_path_buf());
+                        }
+                        dirs.push(d);
+                    }
+                    for f in crate::vscode::find_workspace_files(&dirs) {
+                        let n = crate::vscode::parse_workspace(&f).map(|w| w.folders.len()).unwrap_or(0);
+                        self.found_ws.push((tilde(&f), n));
+                    }
+                    if self.found_ws.is_empty() {
+                        self.found_ws.push((String::new(), 0));
+                    }
+                }
+                for (f, n) in self.found_ws.iter().filter(|(f, _)| !f.is_empty()) {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(f).font(egui::FontId::monospace(12.0)).color(TEXT));
+                        ui.label(RichText::new(format!("{n} フォルダ · 置き場から自動で見つけた")).size(11.0).color(FAINT));
+                    });
+                }
+                let mut remove = None;
+                for (i, w) in self.workspaces.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(w).font(egui::FontId::monospace(12.0)).color(TEXT));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.small_button("外す").clicked() {
+                                remove = Some(i);
+                            }
+                        });
+                    });
+                }
+                if let Some(i) = remove {
+                    self.workspaces.remove(i);
+                }
+                if ui.button("ワークスペースを足す…").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("VSCode ワークスペース", &["code-workspace"]).set_directory(expand("~")).pick_file() {
+                        let t = tilde(&p);
+                        if !self.workspaces.contains(&t) {
+                            self.workspaces.push(t);
+                        }
+                    }
+                }
+
+                ui.add_space(18.0);
                 section(ui, "エディタ", "「エディタで開く」に使うアプリ");
                 let mut choices = self.editors.clone();
                 if !choices.contains(&self.editor) {
@@ -275,6 +330,8 @@ impl Setup {
         };
         c.editor_app = self.editor.clone();
         c.notify = self.notify;
+        c.workspaces = self.workspaces.clone();
+        c.vscode_recent = self.vscode_recent;
         c.font_size = self.font_size;
         c
     }

@@ -15,6 +15,7 @@ mod shot;
 mod term;
 mod theme;
 mod util;
+mod vscode;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,9 +26,10 @@ use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
 const HELP: &str = "\
 mure — コーディングエージェントを並べて動かすデスクトップアプリ
 
-使い方: mure [-a エージェント] [フォルダ]
+使い方: mure [-a エージェント] [フォルダ | ワークスペース.code-workspace]
 
   フォルダ          新しいセッションの最初のフォルダ（省略すると今いる場所）
+  .code-workspace   VSCode のワークスペースを開き、そのフォルダから選ぶ
   -a エージェント   起動と同時にそのエージェントを1つ開く（claude / codex / shell など）
 
 設定は ~/.config/mure/config.toml";
@@ -51,6 +53,12 @@ fn main() -> Result<()> {
             _ => dir = Some(PathBuf::from(a)),
         }
     }
+    let mut workspace = None;
+    if let Some(d) = dir.clone().filter(|d| d.extension().is_some_and(|x| x == "code-workspace")) {
+        let f = std::fs::canonicalize(&d).map_err(|_| anyhow::anyhow!("ワークスペースが見つかりません: {}", d.display()))?;
+        dir = f.parent().map(|p| p.to_path_buf());
+        workspace = Some(f);
+    }
     let dir = match dir {
         Some(d) => std::fs::canonicalize(&d)
             .ok()
@@ -62,7 +70,14 @@ fn main() -> Result<()> {
             if cwd == PathBuf::from("/") { std::env::var_os("HOME").map(PathBuf::from).unwrap_or(cwd) } else { cwd }
         }
     };
-    let (cfg, cfg_err) = config::load();
+    let (mut cfg, cfg_err) = config::load();
+    if let Some(w) = &workspace {
+        let t = util::tilde(w);
+        if !cfg.workspaces.contains(&t) {
+            cfg.workspaces.insert(0, t);
+        }
+    }
+    let open_picker = workspace.is_some();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -76,7 +91,7 @@ fn main() -> Result<()> {
         options,
         Box::new(move |cc| {
             setup(&cc.egui_ctx);
-            Ok(Box::new(app::MureApp::new(cc, cfg, cfg_err, dir, start)))
+            Ok(Box::new(app::MureApp::new(cc, cfg, cfg_err, dir, start, open_picker)))
         }),
     )
     .map_err(|e| anyhow::anyhow!("ウィンドウを開けませんでした: {e}"))

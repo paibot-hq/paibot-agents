@@ -12,6 +12,7 @@
 - ファイルを名前から開く（⌘P）、全体を検索（⌘⇧F、rg があれば rg）
 - 差分パネル（⌘D）、エディタ／Finder で開く
 - 新しいセッション（⌘N）: プロジェクトの一覧から選んで Enter ですぐ始まる。文字を打つと絞り込み、Tab でエージェントを切り替え
+- VSCode を読む（書き込みはしない）: `.code-workspace` のフォルダと、VSCode・Cursor・Windsurf で最近開いたフォルダ／ワークスペースを新規作成の一覧に並べる。`mure work.code-workspace` で直接開ける。複数フォルダのワークスペースは共通の親を「（全体）」として選べる
 - 初めて起動したときに設定画面（あとから ⌘,）。プロジェクトの置き場、入っているエージェント（自動で探す）、エディタを選ぶ
 - お節介はしない: フックを入れない、エージェントの設定に触らない、worktree を勝手に消さない
 
@@ -24,7 +25,7 @@ mure
 
 Dock から開きたいときは `sh scripts/bundle.sh ~/Applications` で `Mure.app` を作る。
 
-`mure ~/work/x` のようにフォルダを渡すと、新規作成の最初のフォルダがそこになる。`mure -a claude` で起動と同時に1つ開く。
+`mure ~/work/x` のようにフォルダを渡すと、新規作成の最初のフォルダがそこになる。`mure -a claude` で起動と同時に1つ開く。`mure ~/work/work.code-workspace` でワークスペースのフォルダから選ぶ。
 
 ## キー
 
@@ -54,6 +55,8 @@ Dock から開きたいときは `sh scripts/bundle.sh ~/Applications` で `Mure
 ```toml
 project_roots = ["~/work"]    # この中のフォルダが新規作成の一覧に並ぶ
 projects = []                 # 個別に並べたいフォルダ
+workspaces = []               # 並べたい .code-workspace（置き場とその1つ上にあるものは自動）
+vscode_recent = true          # VSCode などで最近開いたものも並べる
 default_agent = "claude"
 notify = true                 # 手が空いたら通知
 idle_secs = 2.0               # 出力がこの秒数止まったら「止まった」

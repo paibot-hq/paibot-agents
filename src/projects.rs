@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
+use crate::config::Config;
 use crate::util::{expand, tilde};
+use crate::vscode;
 
 #[derive(Debug, Clone)]
 pub struct Project {
@@ -12,11 +14,12 @@ pub struct Project {
     /// ~ で始まる表示用の場所
     pub path: String,
     pub git: bool,
-    pub recent: bool,
+    /// 一覧の見出し
+    pub group: String,
     modified: SystemTime,
 }
 
-fn project(p: &Path, recent: bool) -> Option<Project> {
+fn project(p: &Path, group: &str) -> Option<Project> {
     let meta = std::fs::metadata(p).ok()?;
     if !meta.is_dir() {
         return None;
@@ -32,37 +35,88 @@ fn project(p: &Path, recent: bool) -> Option<Project> {
         name: p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| tilde(p)),
         path: tilde(p),
         git: git_meta.is_some(),
-        recent,
+        group: group.to_string(),
         modified,
     })
 }
 
-/// 最近使ったもの → 個別に登録したもの → 置き場の中（最近さわった順）
-pub fn list(roots: &[String], pinned: &[String], recent: &[String]) -> Vec<Project> {
+/// mure で最近使ったもの → VSCode のワークスペース → VSCode で最近開いたフォルダ → 個別に登録したもの → 置き場の中（最近さわった順）
+pub fn list(cfg: &Config, recent: &[String]) -> Vec<Project> {
     let mut out: Vec<Project> = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut add = |out: &mut Vec<Project>, p: &Path, group: &str, name: Option<String>| {
+        let Ok(p) = std::fs::canonicalize(p) else { return };
+        if seen.insert(p.clone()) {
+            if let Some(mut pr) = project(&p, group) {
+                if let Some(n) = name {
+                    pr.name = n;
+                }
+                out.push(pr);
+            }
+        }
+    };
     for r in recent {
-        let p = expand(r);
-        if seen.insert(p.clone()) {
-            out.extend(project(&p, true));
+        add(&mut out, &expand(r), "最近", None);
+    }
+
+    // ワークスペース: 設定にあるもの、置き場とその1つ上にあるもの、VSCode で最近開いたもの
+    let recent_code = if cfg.vscode_recent { vscode::recent(40) } else { Vec::new() };
+    let mut ws_files: Vec<PathBuf> = cfg.workspaces.iter().map(|w| expand(w)).collect();
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for r in &cfg.project_roots {
+        let d = expand(r);
+        if let Some(p) = d.parent() {
+            dirs.push(p.to_path_buf());
+        }
+        dirs.push(d);
+    }
+    for f in vscode::find_workspace_files(&dirs) {
+        if !ws_files.contains(&f) {
+            ws_files.push(f);
         }
     }
+    for r in &recent_code {
+        if let vscode::Recent::Workspace(f) = r {
+            if !ws_files.contains(f) {
+                ws_files.push(f.clone());
+            }
+        }
+    }
+    for f in ws_files {
+        let Some(ws) = vscode::parse_workspace(&f) else { continue };
+        let group = format!("VSCode ワークスペース: {}", ws.name);
+        if ws.folders.len() > 1 {
+            if let Some(parent) = vscode::common_parent(&ws.folders) {
+                add(&mut out, &parent, &group, Some(format!("{}（全体）", ws.name)));
+            }
+        }
+        for d in &ws.folders {
+            add(&mut out, d, &group, None);
+        }
+    }
+
+    let mut code_recent = Vec::new();
+    for r in &recent_code {
+        if let vscode::Recent::Folder(p) = r {
+            if code_recent.len() < 15 {
+                add(&mut code_recent, p, "VSCode で最近開いた", None);
+            }
+        }
+    }
+    out.extend(code_recent);
+
     let mut rest = Vec::new();
-    for r in pinned {
-        let p = expand(r);
-        if seen.insert(p.clone()) {
-            rest.extend(project(&p, false));
-        }
+    for r in &cfg.projects {
+        add(&mut rest, &expand(r), "プロジェクト", None);
     }
-    for root in roots {
+    for root in &cfg.project_roots {
         let Ok(rd) = std::fs::read_dir(expand(root)) else { continue };
         for e in rd.flatten() {
             let p = e.path();
             let hidden = p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'));
-            if hidden || !seen.insert(p.clone()) {
-                continue;
+            if !hidden && p.is_dir() {
+                add(&mut rest, &p, "プロジェクト", None);
             }
-            rest.extend(project(&p, false));
         }
     }
     rest.sort_by(|a, b| b.modified.cmp(&a.modified));

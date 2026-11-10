@@ -18,6 +18,10 @@ pub struct Config {
     pub project_roots: Vec<String>,
     /// 一覧に出したい個別のフォルダ
     pub projects: Vec<String>,
+    /// 一覧に出す VSCode のワークスペース（.code-workspace）
+    pub workspaces: Vec<String>,
+    /// VSCode / Cursor などで最近開いたフォルダとワークスペースも一覧に出す
+    pub vscode_recent: bool,
     /// 新規作成で最初に選ばれているエージェント
     pub default_agent: String,
     /// 「エディタで開く」に使うアプリ
@@ -38,6 +42,8 @@ impl Default for Config {
         Self {
             project_roots: Vec::new(),
             projects: Vec::new(),
+            workspaces: Vec::new(),
+            vscode_recent: true,
             default_agent: "claude".into(),
             editor_app: "Visual Studio Code".into(),
             notify: true,

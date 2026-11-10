@@ -32,7 +32,7 @@ impl Picker {
             hi: 0,
             worktree: false,
             branch: String::new(),
-            projects: projects::list(&cfg.project_roots, &cfg.projects, recent),
+            projects: projects::list(cfg, recent),
             first: true,
             scroll_to_hi: false,
         }
@@ -149,16 +149,15 @@ impl Picker {
                         ui.label(RichText::new(msg).color(MUTED));
                     });
                 }
-                let mut last_recent = true;
+                let mut last_group = String::new();
                 for (i, p) in list.iter().enumerate() {
-                    if i == 0 && p.recent {
-                        ui.label(RichText::new("最近").size(11.0).color(FAINT));
+                    if p.group != last_group {
+                        if i > 0 {
+                            ui.add_space(4.0);
+                        }
+                        ui.label(RichText::new(&p.group).size(11.0).color(FAINT));
+                        last_group = p.group.clone();
                     }
-                    if last_recent && !p.recent && i > 0 {
-                        ui.add_space(4.0);
-                        ui.label(RichText::new("プロジェクト").size(11.0).color(FAINT));
-                    }
-                    last_recent = p.recent;
                     let on = i == hi;
                     let id = Id::new(("proj", &p.path));
                     let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());

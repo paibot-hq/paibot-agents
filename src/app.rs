@@ -159,7 +159,14 @@ pub struct MureApp {
 }
 
 impl MureApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, cfg: Config, cfg_err: Option<String>, dir: PathBuf, start: Option<String>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        cfg: Config,
+        cfg_err: Option<String>,
+        dir: PathBuf,
+        start: Option<String>,
+        open_picker: bool,
+    ) -> Self {
         let ctx = cc.egui_ctx.clone();
         let wake: Wake = Arc::new(move || ctx.request_repaint());
         let git_dirs = Arc::new(Mutex::new(Vec::new()));
@@ -210,6 +217,9 @@ impl MureApp {
                 }
                 None => app.flash(format!("エージェント「{name}」は設定にありません")),
             }
+        }
+        if open_picker {
+            app.open_new();
         }
         match shot_ui.as_str() {
             "new" => app.open_new(),
