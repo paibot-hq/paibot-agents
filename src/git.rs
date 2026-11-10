@@ -1,9 +1,12 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Result, bail};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+
+use crate::session::Wake;
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git").arg("-C").arg(dir).args(args).output()?;
@@ -21,9 +24,9 @@ pub fn current_branch(dir: &Path) -> Option<String> {
 
 /// <repo>/../<repo名>.worktrees/<ブランチ> にworktreeを用意する（あれば使い回す）
 pub fn ensure_worktree(dir: &Path, branch: &str) -> Result<PathBuf> {
-    let root = PathBuf::from(git(dir, &["rev-parse", "--show-toplevel"]).map_err(|_| {
-        anyhow::anyhow!("{} はgitリポジトリではありません", dir.display())
-    })?.trim());
+    let root = git(dir, &["rev-parse", "--show-toplevel"])
+        .map_err(|_| anyhow::anyhow!("{} はgitリポジトリではありません", dir.display()))?;
+    let root = PathBuf::from(root.trim());
     let name = root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "repo".into());
     let base = root.parent().unwrap_or(&root).join(format!("{name}.worktrees"));
     let path = base.join(branch.replace('/', "-"));
@@ -41,61 +44,107 @@ pub fn ensure_worktree(dir: &Path, branch: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-const MAX_LINES: usize = 20_000;
+fn diff_base(dir: &Path) -> Vec<&'static str> {
+    if git(dir, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok() {
+        vec!["diff", "HEAD", "--no-color", "-M"]
+    } else {
+        vec!["diff", "--no-color"]
+    }
+}
 
-/// 状態と差分（コミットしていない分すべて）を色付きの行にする
-pub fn diff_lines(dir: &Path) -> Vec<Line<'static>> {
-    let dim = Style::default().fg(Color::DarkGray);
-    let status = match git(dir, &["status", "--short", "--branch"]) {
-        Ok(s) => s,
-        Err(e) => return vec![Line::styled(format!("git の状態を取れませんでした: {e}"), dim)],
-    };
-    let mut lines = Vec::new();
-    for l in status.lines() {
-        let style = if l.starts_with("##") {
-            Style::default().add_modifier(Modifier::BOLD)
-        } else if l.starts_with("??") {
-            dim
-        } else {
-            Style::default().fg(Color::Yellow)
-        };
-        lines.push(Line::styled(l.to_string(), style));
-    }
-    lines.push(Line::raw(""));
+/// 一覧のカードに出す小さな情報
+#[derive(Debug, Clone, Default)]
+pub struct Info {
+    pub branch: Option<String>,
+    pub added: usize,
+    pub removed: usize,
+    pub files: usize,
+}
 
-    let has_head = git(dir, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok();
-    let base: &[&str] = if has_head { &["diff", "HEAD", "--no-color", "-M"] } else { &["diff", "--no-color"] };
-    let stat = git(dir, &[base, &["--stat"]].concat()).unwrap_or_default();
-    let diff = git(dir, base).unwrap_or_default();
-    if diff.trim().is_empty() {
-        lines.push(Line::styled("（コミットしていない差分はありません）", dim));
-        return lines;
+pub fn info(dir: &Path) -> Info {
+    let mut i = Info { branch: current_branch(dir), ..Default::default() };
+    if i.branch.is_none() {
+        return i;
     }
-    for l in stat.lines() {
-        lines.push(Line::styled(l.replace('\t', "    "), dim));
+    let mut args = diff_base(dir);
+    args.push("--numstat");
+    for l in git(dir, &args).unwrap_or_default().lines() {
+        let mut it = l.split('\t');
+        i.added += it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        i.removed += it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        i.files += 1;
     }
-    lines.push(Line::raw(""));
-    for l in diff.lines() {
-        if lines.len() >= MAX_LINES {
-            lines.push(Line::styled("……（長いので省略）", dim));
-            break;
+    i.files += git(dir, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default().lines().count();
+    i
+}
+
+/// 見ているフォルダのgit情報を裏で3秒ごとに取り直す
+pub fn spawn_watcher(dirs: Arc<Mutex<Vec<PathBuf>>>, out: Arc<Mutex<HashMap<PathBuf, Info>>>, wake: Wake) {
+    std::thread::spawn(move || {
+        loop {
+            let list = dirs.lock().unwrap().clone();
+            for d in list {
+                let inf = info(&d);
+                out.lock().unwrap().insert(d, inf);
+            }
+            wake();
+            std::thread::sleep(Duration::from_secs(3));
         }
-        let style = if l.starts_with("diff --git") {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-        } else if l.starts_with("+++") || l.starts_with("---") {
-            Style::default().add_modifier(Modifier::BOLD)
-        } else if l.starts_with('+') {
-            Style::default().fg(Color::Green)
-        } else if l.starts_with('-') {
-            Style::default().fg(Color::Red)
+    });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Kind {
+    File,
+    Meta,
+    Hunk,
+    Add,
+    Del,
+    Plain,
+}
+
+pub struct DiffLine {
+    pub kind: Kind,
+    pub text: String,
+}
+
+pub struct Diff {
+    pub status: Vec<String>,
+    pub lines: Vec<DiffLine>,
+    pub error: Option<String>,
+}
+
+const MAX_LINES: usize = 50_000;
+
+/// 状態と、コミットしていない差分すべて
+pub fn diff(dir: &Path) -> Diff {
+    let status = match git(dir, &["status", "--short"]) {
+        Ok(s) => s.lines().map(str::to_string).collect(),
+        Err(e) => return Diff { status: vec![], lines: vec![], error: Some(format!("{e}")) },
+    };
+    let args = diff_base(dir);
+    let text = git(dir, &args).unwrap_or_default();
+    let mut lines = Vec::new();
+    for l in text.lines().take(MAX_LINES) {
+        let kind = if l.starts_with("diff --git") {
+            Kind::File
+        } else if l.starts_with("+++") || l.starts_with("---") || l.starts_with("index ") || l.starts_with("new file") || l.starts_with("deleted file") || l.starts_with("similarity") || l.starts_with("rename ") {
+            Kind::Meta
         } else if l.starts_with("@@") {
-            Style::default().fg(Color::Cyan)
-        } else if l.starts_with("index ") {
-            dim
+            Kind::Hunk
+        } else if l.starts_with('+') {
+            Kind::Add
+        } else if l.starts_with('-') {
+            Kind::Del
         } else {
-            Style::default()
+            Kind::Plain
         };
-        lines.push(Line::from(Span::styled(l.replace('\t', "    "), style)));
+        let text = if kind == Kind::File {
+            l.split(" b/").last().unwrap_or(l).to_string()
+        } else {
+            l.replace('\t', "    ")
+        };
+        lines.push(DiffLine { kind, text });
     }
-    lines
+    Diff { status, lines, error: None }
 }

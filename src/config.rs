@@ -13,8 +13,6 @@ pub struct Agent {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// 入力中から一覧に戻るキー（ctrl-<文字>）
-    pub prefix: String,
     /// 手が空いたときにmacOSの通知を出す
     pub notify: bool,
     /// 出力がこの秒数止まったら「止まった」とみなす
@@ -22,19 +20,21 @@ pub struct Config {
     /// 最後の入力からこの秒数以上動いてから止まったら「待ち」にする
     pub min_busy_secs: f64,
     pub scrollback: usize,
-    pub sidebar_width: u16,
+    pub font_size: f32,
+    /// 「エディタで開く」に使うアプリ
+    pub editor_app: String,
     pub agents: Vec<Agent>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            prefix: "ctrl-]".into(),
             notify: true,
             idle_secs: 2.0,
             min_busy_secs: 5.0,
-            scrollback: 5000,
-            sidebar_width: 30,
+            scrollback: 10000,
+            font_size: 13.0,
+            editor_app: "Visual Studio Code".into(),
             agents: default_agents(),
         }
     }
@@ -66,12 +66,9 @@ pub fn load() -> (Config, Option<String>) {
             if c.agents.is_empty() {
                 c.agents = default_agents();
             }
-            c.sidebar_width = c.sidebar_width.clamp(16, 80);
+            c.font_size = c.font_size.clamp(8.0, 32.0);
             (c, None)
         }
-        Err(e) => (
-            Config::default(),
-            Some(format!("{} を読めませんでした: {}", p.display(), e.message())),
-        ),
+        Err(e) => (Config::default(), Some(format!("{} を読めませんでした: {}", p.display(), e.message()))),
     }
 }

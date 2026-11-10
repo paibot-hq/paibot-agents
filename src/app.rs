@@ -1,376 +1,147 @@
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::text::Line;
+use eframe::egui::{
+    self, Align, Color32, CornerRadius, FontId, Frame, Id, Key, Label, Layout, Margin, Modifiers, RichText, ScrollArea,
+    Sense, Stroke, TextEdit, Ui, vec2,
+};
 
 use crate::config::Config;
-use crate::keys::{self, KeySpec};
-use crate::session::Session;
-use crate::{git, notify};
+use crate::git::{self, Kind};
+use crate::notify;
+use crate::session::{Session, Wake};
+use crate::term::{self, TermState};
+use crate::theme::*;
 
-pub struct NewForm {
-    pub agent: usize,
-    pub dir: String,
-    pub branch: String,
-    /// 0=エージェント 1=フォルダ 2=ブランチ
-    pub field: usize,
+struct NewForm {
+    agent: usize,
+    dir: String,
+    branch: String,
+    first: bool,
 }
 
-pub struct DiffView {
-    pub lines: Vec<Line<'static>>,
-    pub scroll: usize,
+enum Confirm {
+    Kill(usize),
+    Quit,
 }
 
-pub enum Mode {
-    /// 一覧を操作している
-    Nav,
-    /// 選んだセッションにキーを送っている
-    Term,
-    New(NewForm),
-    Rename(String),
-    ConfirmKill,
-    ConfirmQuit,
-    Diff(DiffView),
-    Help,
+struct DiffPanel {
+    cwd: PathBuf,
+    diff: git::Diff,
 }
 
-pub struct App {
-    pub cfg: Config,
-    pub prefix: KeySpec,
-    pub sessions: Vec<Session>,
-    pub sel: usize,
-    pub mode: Mode,
-    pub quit: bool,
-    pub dirty: Arc<AtomicBool>,
-    pub flash: Option<(String, Instant)>,
-    /// (行, 桁) 右側の端末の大きさ
-    pub pane: (u16, u16),
-    pub focused: bool,
-    last_dir: String,
-    last_git: Instant,
+/// 一覧のカードなどで押されたこと（描き終わってからまとめて実行する）
+enum Action {
+    Select(usize),
+    New,
+    Rename(usize),
+    Kill(usize),
+    Remove(usize),
+    Diff(usize),
+    Editor(usize),
+    Finder(usize),
 }
 
-impl App {
-    pub fn new(cfg: Config, dir: PathBuf, (w, h): (u16, u16)) -> Self {
-        let mut flash = None;
-        let prefix = KeySpec::parse(&cfg.prefix).unwrap_or_else(|| {
-            flash = Some((format!("prefix \"{}\" は使えないので Ctrl-] にします", cfg.prefix), Instant::now()));
-            KeySpec::parse("ctrl-]").unwrap()
-        });
+pub struct MureApp {
+    cfg: Config,
+    sessions: Vec<Session>,
+    sel: usize,
+    term: TermState,
+    new_form: Option<NewForm>,
+    rename: Option<(usize, String)>,
+    confirm: Option<Confirm>,
+    diff: Option<DiffPanel>,
+    flash: Option<(String, Instant)>,
+    recent: Vec<String>,
+    git_dirs: Arc<Mutex<Vec<PathBuf>>>,
+    git_info: Arc<Mutex<HashMap<PathBuf, git::Info>>>,
+    wake: Wake,
+    allow_close: bool,
+    shot: Option<crate::shot::Shot>,
+    window_focused: bool,
+}
+
+impl MureApp {
+    pub fn new(cc: &eframe::CreationContext<'_>, cfg: Config, cfg_err: Option<String>, dir: PathBuf, start: Option<String>) -> Self {
+        let ctx = cc.egui_ctx.clone();
+        let wake: Wake = Arc::new(move || ctx.request_repaint());
+        let git_dirs = Arc::new(Mutex::new(Vec::new()));
+        let git_info = Arc::new(Mutex::new(HashMap::new()));
+        git::spawn_watcher(git_dirs.clone(), git_info.clone(), wake.clone());
         let mut app = Self {
-            prefix,
+            term: TermState::new(cfg.font_size),
+            cfg,
             sessions: Vec::new(),
             sel: 0,
-            mode: Mode::Nav,
-            quit: false,
-            dirty: Arc::new(AtomicBool::new(true)),
-            flash,
-            pane: (1, 1),
-            focused: true,
-            last_dir: tilde(&dir),
-            last_git: Instant::now(),
-            cfg,
+            new_form: None,
+            rename: None,
+            confirm: None,
+            diff: None,
+            flash: cfg_err.map(|e| (e, Instant::now())),
+            recent: vec![tilde(&dir)],
+            git_dirs,
+            git_info,
+            wake,
+            allow_close: false,
+            shot: crate::shot::Shot::from_env(),
+            window_focused: true,
         };
-        app.pane = app.pane_size(w, h);
+        match app.shot.as_ref().map(|s| s.ui.as_str()) {
+            Some("new") => app.open_new(),
+            Some("diff") if start.is_some() => app.diff = Some(DiffPanel { cwd: dir.clone(), diff: git::diff(&dir) }),
+            _ => {}
+        }
+        if let Some(name) = start {
+            match app.cfg.agents.iter().position(|a| a.name == name) {
+                Some(agent) => {
+                    let form = NewForm { agent, dir: tilde(&dir), branch: String::new(), first: false };
+                    if let Err(e) = app.create(&form) {
+                        app.flash(format!("{e:#}"));
+                    }
+                }
+                None => app.flash(format!("エージェント「{name}」は設定にありません")),
+            }
+        }
         app
     }
 
-    pub fn flash(&mut self, msg: impl Into<String>) {
+    fn flash(&mut self, msg: impl Into<String>) {
         self.flash = Some((msg.into(), Instant::now()));
     }
 
-    pub fn take_dirty(&self) -> bool {
-        self.dirty.swap(false, Ordering::Relaxed)
-    }
-
-    pub fn current(&self) -> Option<&Session> {
-        self.sessions.get(self.sel)
-    }
-
-    fn current_mut(&mut self) -> Option<&mut Session> {
-        self.sessions.get_mut(self.sel)
-    }
-
-    fn pane_size(&self, w: u16, h: u16) -> (u16, u16) {
-        // 下に状態行、右側の上に見出し行
-        (h.saturating_sub(2).max(1), w.saturating_sub(self.cfg.sidebar_width).max(1))
-    }
-
-    fn resize(&mut self, w: u16, h: u16) {
-        self.pane = self.pane_size(w, h);
-        let (r, c) = self.pane;
-        for s in &mut self.sessions {
-            s.resize(r, c);
-        }
-    }
-
-    fn select(&mut self, i: usize) {
-        if self.sessions.is_empty() {
-            return;
-        }
-        self.sel = i.min(self.sessions.len() - 1);
-        self.sessions[self.sel].attention = false;
-    }
-
-    pub fn alive(&self) -> usize {
+    fn alive(&self) -> usize {
         self.sessions.iter().filter(|s| s.exit.is_none()).count()
     }
 
-    /// 定期処理: 終了の検出、実行中/待ちの判定、ブランチ名の更新
-    pub fn tick(&mut self) {
-        let now = Instant::now();
-        let idle = Duration::from_secs_f64(self.cfg.idle_secs.max(0.2));
-        let min_busy = Duration::from_secs_f64(self.cfg.min_busy_secs.max(0.0));
-        let refresh_git = now.duration_since(self.last_git) > Duration::from_secs(3);
-        let watching_term = matches!(self.mode, Mode::Term);
-        let mut changed = false;
+    fn dialog_open(&self) -> bool {
+        self.new_form.is_some() || self.rename.is_some() || self.confirm.is_some()
+    }
 
-        for (i, s) in self.sessions.iter_mut().enumerate() {
-            // 入力中のセッションを、ウィンドウを前にして見ている
-            let watching = i == self.sel && watching_term;
-            let in_view = watching && self.focused;
-            if s.poll_exit() {
-                changed = true;
-                if !watching {
-                    s.attention = true;
-                }
-                if self.cfg.notify && !in_view {
-                    let code = s.exit.unwrap_or(0);
-                    notify::send(&format!("{} が終了しました（{}）", s.name, code), &s.agent);
-                }
-                continue;
-            }
-            if s.exit.is_some() {
-                continue;
-            }
-            let last = s.last_output();
-            let busy = now.duration_since(last) < idle && s.work_after_input() > Duration::from_millis(300);
-            if s.busy && !busy && s.work_after_input() >= min_busy {
-                // 動いていたのが止まった＝こちらの番
-                if !watching {
-                    s.attention = true;
-                }
-                if self.cfg.notify && !in_view {
-                    notify::send(&format!("{} が待っています", s.name), &s.agent);
+    fn select(&mut self, i: usize) {
+        if i < self.sessions.len() && i != self.sel {
+            self.sel = i;
+            self.term.reset();
+            if let Some(d) = &self.diff {
+                if d.cwd != self.sessions[i].cwd {
+                    self.open_diff(i);
                 }
             }
-            if s.busy != busy {
-                s.busy = busy;
-                changed = true;
-            }
-            if refresh_git {
-                let b = git::current_branch(&s.cwd);
-                if b != s.branch {
-                    s.branch = b;
-                    changed = true;
-                }
-            }
-        }
-        if refresh_git {
-            self.last_git = now;
-        }
-        if let Some((_, t)) = &self.flash {
-            if t.elapsed() > Duration::from_secs(5) {
-                self.flash = None;
-                changed = true;
-            }
-        }
-        if changed {
-            self.dirty.store(true, Ordering::Relaxed);
         }
     }
 
-    pub fn handle(&mut self, ev: Event) {
-        match ev {
-            Event::Resize(w, h) => self.resize(w, h),
-            Event::FocusGained => self.focused = true,
-            Event::FocusLost => self.focused = false,
-            Event::Paste(text) => self.paste(&text),
-            Event::Key(k) if k.kind != KeyEventKind::Release => self.key(k),
-            _ => {}
-        }
-        self.dirty.store(true, Ordering::Relaxed);
+    fn open_new(&mut self) {
+        let dir = self.recent.first().cloned().unwrap_or_else(|| "~".into());
+        self.new_form = Some(NewForm { agent: 0, dir, branch: String::new(), first: true });
     }
 
-    fn paste(&mut self, text: &str) {
-        let one_line = || text.replace(['\r', '\n'], "");
-        match &mut self.mode {
-            Mode::Term => {
-                if let Some(s) = self.sessions.get_mut(self.sel) {
-                    s.paste(text);
-                }
-            }
-            Mode::New(f) => match f.field {
-                1 => f.dir.push_str(&one_line()),
-                2 => f.branch.push_str(&one_line()),
-                _ => {}
-            },
-            Mode::Rename(s) => s.push_str(&one_line()),
-            _ => {}
+    fn open_diff(&mut self, i: usize) {
+        if let Some(s) = self.sessions.get(i) {
+            self.diff = Some(DiffPanel { cwd: s.cwd.clone(), diff: git::diff(&s.cwd) });
         }
-    }
-
-    fn key(&mut self, k: KeyEvent) {
-        let mode = std::mem::replace(&mut self.mode, Mode::Nav);
-        self.mode = match mode {
-            Mode::Term => self.key_term(k),
-            Mode::Nav => self.key_nav(k),
-            Mode::New(f) => self.key_new(f, k),
-            Mode::Rename(s) => self.key_rename(s, k),
-            Mode::ConfirmKill => {
-                if matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
-                    self.remove_current();
-                }
-                Mode::Nav
-            }
-            Mode::ConfirmQuit => {
-                if matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
-                    self.quit = true;
-                }
-                Mode::Nav
-            }
-            Mode::Diff(d) => self.key_diff(d, k),
-            Mode::Help => Mode::Nav,
-        };
-    }
-
-    fn key_term(&mut self, k: KeyEvent) -> Mode {
-        if self.prefix.matches(&k) {
-            return Mode::Nav;
-        }
-        let Some(s) = self.current_mut() else { return Mode::Nav };
-        if s.exit.is_some() {
-            return Mode::Nav;
-        }
-        let app_cursor = s.parser.lock().unwrap().screen().application_cursor();
-        if let Some(b) = keys::encode(&k, app_cursor) {
-            s.write(&b);
-        }
-        Mode::Term
-    }
-
-    fn enter_term(&mut self) -> Mode {
-        let alive = self.current().is_some_and(|s| s.exit.is_none());
-        self.select(self.sel);
-        if alive {
-            if let Some(s) = self.current_mut() {
-                s.scroll(isize::MIN / 2);
-            }
-            Mode::Term
-        } else {
-            if self.current().is_some() {
-                self.flash("このセッションは終了しています（x で片付け）");
-            }
-            Mode::Nav
-        }
-    }
-
-    fn key_nav(&mut self, k: KeyEvent) -> Mode {
-        let has = !self.sessions.is_empty();
-        if self.prefix.matches(&k) {
-            // もう一度押すとそのキー自体を送る
-            let byte = self.prefix.byte();
-            if let Some(s) = self.current_mut() {
-                s.write(&[byte]);
-            }
-            return self.enter_term();
-        }
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let half = (self.pane.0 / 2).max(1) as isize;
-        match k.code {
-            KeyCode::Char('d') if ctrl => self.scroll(-half),
-            KeyCode::Char('u') if ctrl => self.scroll(half),
-            KeyCode::Char('j') | KeyCode::Down => self.select(self.sel + 1),
-            KeyCode::Char('k') | KeyCode::Up => self.select(self.sel.saturating_sub(1)),
-            KeyCode::Enter | KeyCode::Char('i') | KeyCode::Char('l') | KeyCode::Right if has => return self.enter_term(),
-            KeyCode::Char(c @ '1'..='9') => {
-                let i = c as usize - '1' as usize;
-                if i < self.sessions.len() {
-                    self.select(i);
-                    return self.enter_term();
-                }
-            }
-            KeyCode::Char('n') | KeyCode::Char('c') => {
-                return Mode::New(NewForm { agent: 0, dir: self.last_dir.clone(), branch: String::new(), field: 0 });
-            }
-            KeyCode::Char('r') if has => return Mode::Rename(self.sessions[self.sel].name.clone()),
-            KeyCode::Char('x') if has => {
-                if self.sessions[self.sel].exit.is_some() {
-                    self.remove_current();
-                } else {
-                    return Mode::ConfirmKill;
-                }
-            }
-            KeyCode::Char('d') if has => {
-                let lines = git::diff_lines(&self.sessions[self.sel].cwd);
-                return Mode::Diff(DiffView { lines, scroll: 0 });
-            }
-            KeyCode::PageUp => self.scroll(half * 2),
-            KeyCode::PageDown => self.scroll(-half * 2),
-            KeyCode::Esc => self.scroll(isize::MIN / 2),
-            KeyCode::Char('q') => {
-                if self.alive() > 0 {
-                    return Mode::ConfirmQuit;
-                }
-                self.quit = true;
-            }
-            KeyCode::Char('?') => return Mode::Help,
-            _ => {}
-        }
-        Mode::Nav
-    }
-
-    fn scroll(&mut self, delta: isize) {
-        if let Some(s) = self.current_mut() {
-            s.scroll(delta);
-        }
-    }
-
-    fn key_new(&mut self, mut f: NewForm, k: KeyEvent) -> Mode {
-        let n = self.cfg.agents.len();
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        match k.code {
-            KeyCode::Esc => return Mode::Nav,
-            KeyCode::Tab | KeyCode::Down => f.field = (f.field + 1) % 3,
-            KeyCode::BackTab | KeyCode::Up => f.field = (f.field + 2) % 3,
-            KeyCode::Left if f.field == 0 => f.agent = (f.agent + n - 1) % n,
-            KeyCode::Right | KeyCode::Char(' ') if f.field == 0 => f.agent = (f.agent + 1) % n,
-            KeyCode::Char(c @ '1'..='9') if f.field == 0 => {
-                let i = c as usize - '1' as usize;
-                if i < n {
-                    f.agent = i;
-                }
-            }
-            KeyCode::Enter => match self.create(&f) {
-                Ok(()) => return Mode::Term,
-                Err(e) => self.flash(format!("{e:#}")),
-            },
-            KeyCode::Char('u') if ctrl => match f.field {
-                1 => f.dir.clear(),
-                2 => f.branch.clear(),
-                _ => {}
-            },
-            KeyCode::Backspace => match f.field {
-                1 => {
-                    f.dir.pop();
-                }
-                2 => {
-                    f.branch.pop();
-                }
-                _ => {}
-            },
-            KeyCode::Char(c) if !ctrl => match f.field {
-                1 => f.dir.push(c),
-                2 => f.branch.push(c),
-                _ => {}
-            },
-            _ => {}
-        }
-        Mode::New(f)
     }
 
     fn create(&mut self, f: &NewForm) -> Result<()> {
@@ -387,74 +158,618 @@ impl App {
         } else {
             branch.to_string()
         };
-        let s = Session::spawn(name, &agent, cwd, self.pane, self.cfg.scrollback, self.dirty.clone())?;
-        self.last_dir = tilde(&dir);
+        let s = Session::spawn(name, &agent, cwd, self.term.size, self.cfg.scrollback, self.wake.clone())?;
+        let d = tilde(&dir);
+        self.recent.retain(|r| *r != d);
+        self.recent.insert(0, d);
+        self.recent.truncate(12);
         self.sessions.push(s);
         self.sel = self.sessions.len() - 1;
+        self.term.reset();
+        self.sync_git_dirs();
         Ok(())
     }
 
-    fn key_rename(&mut self, mut s: String, k: KeyEvent) -> Mode {
-        match k.code {
-            KeyCode::Esc => return Mode::Nav,
-            KeyCode::Enter => {
-                let name = s.trim().to_string();
-                if !name.is_empty() {
-                    if let Some(cur) = self.current_mut() {
-                        cur.name = name;
-                    }
-                }
-                return Mode::Nav;
-            }
-            KeyCode::Backspace => {
-                s.pop();
-            }
-            KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => s.clear(),
-            KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => s.push(c),
-            _ => {}
-        }
-        Mode::Rename(s)
+    fn sync_git_dirs(&self) {
+        let mut dirs: Vec<PathBuf> = self.sessions.iter().map(|s| s.cwd.clone()).collect();
+        dirs.dedup();
+        *self.git_dirs.lock().unwrap() = dirs;
     }
 
-    fn key_diff(&mut self, mut d: DiffView, k: KeyEvent) -> Mode {
-        let page = self.pane.0.max(2) as usize - 1;
-        let max = d.lines.len().saturating_sub(1);
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        match k.code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') if !ctrl => return Mode::Nav,
-            KeyCode::Char('j') | KeyCode::Down => d.scroll += 1,
-            KeyCode::Char('k') | KeyCode::Up => d.scroll = d.scroll.saturating_sub(1),
-            KeyCode::Char(' ') | KeyCode::PageDown => d.scroll += page,
-            KeyCode::Char('d') => d.scroll += page / 2,
-            KeyCode::Char('u') if ctrl => d.scroll = d.scroll.saturating_sub(page / 2),
-            KeyCode::Char('b') | KeyCode::PageUp => d.scroll = d.scroll.saturating_sub(page),
-            KeyCode::Char('g') | KeyCode::Home => d.scroll = 0,
-            KeyCode::Char('G') | KeyCode::End => d.scroll = max,
-            KeyCode::Char('R') => {
-                if let Some(s) = self.current() {
-                    d.lines = git::diff_lines(&s.cwd);
-                }
-            }
-            _ => {}
-        }
-        d.scroll = d.scroll.min(max);
-        Mode::Diff(d)
-    }
-
-    fn remove_current(&mut self) {
-        if self.sel < self.sessions.len() {
-            let mut s = self.sessions.remove(self.sel);
+    fn remove(&mut self, i: usize) {
+        if i < self.sessions.len() {
+            let mut s = self.sessions.remove(i);
             s.kill();
             if self.sel >= self.sessions.len() {
                 self.sel = self.sessions.len().saturating_sub(1);
             }
+            self.term.reset();
+            self.sync_git_dirs();
+            if self.sessions.is_empty() {
+                self.diff = None;
+            }
         }
     }
 
-    pub fn shutdown(&mut self) {
-        for s in &mut self.sessions {
-            s.kill();
+    fn apply(&mut self, a: Action) {
+        match a {
+            Action::Select(i) => self.select(i),
+            Action::New => self.open_new(),
+            Action::Rename(i) => self.rename = Some((i, self.sessions[i].name.clone())),
+            Action::Kill(i) => self.confirm = Some(Confirm::Kill(i)),
+            Action::Remove(i) => self.remove(i),
+            Action::Diff(i) => {
+                self.select(i);
+                if self.diff.is_some() { self.diff = None } else { self.open_diff(i) }
+            }
+            Action::Editor(i) => {
+                let cwd = self.sessions[i].cwd.clone();
+                let ok = Command::new("open").arg("-a").arg(&self.cfg.editor_app).arg(&cwd).status().is_ok_and(|s| s.success());
+                if !ok {
+                    self.flash(format!("{} で開けませんでした", self.cfg.editor_app));
+                }
+            }
+            Action::Finder(i) => {
+                let _ = Command::new("open").arg(&self.sessions[i].cwd).status();
+            }
         }
+    }
+
+    /// 終了の検出と、実行中／待ちの判定
+    fn tick(&mut self) {
+        let now = Instant::now();
+        let idle = Duration::from_secs_f64(self.cfg.idle_secs.max(0.2));
+        let min_busy = Duration::from_secs_f64(self.cfg.min_busy_secs.max(0.0));
+        let viewing = self.window_focused && !self.dialog_open();
+        for (i, s) in self.sessions.iter_mut().enumerate() {
+            let watching = viewing && i == self.sel;
+            if watching {
+                s.attention = false;
+            }
+            if s.poll_exit() {
+                if !watching {
+                    s.attention = true;
+                    if self.cfg.notify {
+                        notify::send(&format!("{} が終了しました（{}）", s.name, s.exit.unwrap_or(0)), &s.agent);
+                    }
+                }
+                continue;
+            }
+            if s.exit.is_some() {
+                continue;
+            }
+            let busy = now.duration_since(s.last_output()) < idle && s.work_after_input() > Duration::from_millis(300);
+            if s.busy && !busy && s.work_after_input() >= min_busy && !watching {
+                s.attention = true;
+                if self.cfg.notify {
+                    notify::send(&format!("{} が待っています", s.name), &s.agent);
+                }
+            }
+            s.busy = busy;
+        }
+        if self.flash.as_ref().is_some_and(|(_, t)| t.elapsed() > Duration::from_secs(6)) {
+            self.flash = None;
+        }
+    }
+
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        if self.dialog_open() {
+            return;
+        }
+        let cmd = Modifiers::COMMAND;
+        let take = |k: Key| ctx.input_mut(|i| i.consume_key(cmd, k));
+        if take(Key::N) {
+            self.open_new();
+        }
+        if take(Key::D) && !self.sessions.is_empty() {
+            self.apply(Action::Diff(self.sel));
+        }
+        if take(Key::W) && !self.sessions.is_empty() {
+            let i = self.sel;
+            self.apply(if self.sessions[i].exit.is_some() { Action::Remove(i) } else { Action::Kill(i) });
+        }
+        if take(Key::OpenBracket) {
+            self.select(self.sel.saturating_sub(1));
+        }
+        if take(Key::CloseBracket) {
+            self.select(self.sel + 1);
+        }
+        if take(Key::Equals) || take(Key::Plus) {
+            self.term.font_size = (self.term.font_size + 1.0).min(32.0);
+        }
+        if take(Key::Minus) {
+            self.term.font_size = (self.term.font_size - 1.0).max(8.0);
+        }
+        if take(Key::Num0) {
+            self.term.font_size = self.cfg.font_size;
+        }
+        let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
+        for (i, k) in nums.into_iter().enumerate() {
+            if take(k) {
+                self.select(i);
+            }
+        }
+    }
+
+    fn sidebar(&mut self, ui: &mut Ui) -> Vec<Action> {
+        let mut acts = Vec::new();
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("mure").size(18.0).strong().color(TEXT));
+            let busy = self.sessions.iter().filter(|s| s.busy).count();
+            let waiting = self.sessions.iter().filter(|s| s.attention).count();
+            if busy > 0 {
+                ui.label(RichText::new(format!("実行 {busy}")).size(12.0).color(ACCENT));
+            }
+            if waiting > 0 {
+                ui.label(RichText::new(format!("待ち {waiting}")).size(12.0).color(WAITING));
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(egui::Button::new(RichText::new("＋ 新規").size(13.0)).corner_radius(6.0)).on_hover_text("⌘N").clicked() {
+                    acts.push(Action::New);
+                }
+            });
+        });
+        ui.add_space(10.0);
+
+        if self.sessions.is_empty() {
+            ui.label(RichText::new("セッションはまだありません").color(MUTED));
+            return acts;
+        }
+
+        let info = self.git_info.lock().unwrap().clone();
+        let now = Instant::now();
+        ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            for (i, s) in self.sessions.iter().enumerate() {
+                let selected = i == self.sel;
+                let id = Id::new(("card", i));
+                let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
+                let fill = if selected { CARD_SEL } else if hovered { CARD_HOVER } else { CARD };
+                let stroke = if s.attention && !selected {
+                    Stroke::new(1.0, WAITING)
+                } else if selected {
+                    Stroke::new(1.0, ACCENT.gamma_multiply(0.5))
+                } else {
+                    Stroke::new(1.0, BORDER)
+                };
+                let inner = Frame::new()
+                    .fill(fill)
+                    .stroke(stroke)
+                    .corner_radius(CornerRadius::same(8))
+                    .inner_margin(Margin::symmetric(12, 10))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            status_icon(ui, s);
+                            ui.add(Label::new(RichText::new(&s.name).size(14.0).strong().color(if s.exit.is_some() { MUTED } else { TEXT })).truncate());
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if i < 9 {
+                                    ui.label(RichText::new(format!("⌘{}", i + 1)).size(11.0).color(FAINT));
+                                }
+                            });
+                        });
+                        let g = info.get(&s.cwd);
+                        let mut meta = vec![s.agent.clone()];
+                        if let Some(b) = g.and_then(|g| g.branch.clone()).or_else(|| s.branch.clone()) {
+                            if b != s.name {
+                                meta.push(b);
+                            }
+                        }
+                        meta.push(match s.exit {
+                            Some(code) => format!("終了 ({code})"),
+                            None => elapsed(now.duration_since(s.created).as_secs()),
+                        });
+                        ui.add(Label::new(RichText::new(meta.join(" · ")).size(12.0).color(MUTED)).truncate());
+                        let pv = s.preview();
+                        if !pv.is_empty() {
+                            ui.add_space(2.0);
+                            ui.add(Label::new(RichText::new(pv).font(FontId::monospace(11.0)).color(FAINT)).truncate());
+                        }
+                        if let Some(g) = g.filter(|g| g.files > 0) {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                ui.label(RichText::new(format!("+{}", g.added)).size(11.0).color(OK));
+                                ui.label(RichText::new(format!("−{}", g.removed)).size(11.0).color(BAD));
+                                ui.label(RichText::new(format!("{} ファイル", g.files)).size(11.0).color(FAINT));
+                            });
+                        }
+                    });
+                let resp = ui.interact(inner.response.rect, id, Sense::click());
+                if resp.clicked() {
+                    acts.push(Action::Select(i));
+                }
+                if resp.double_clicked() {
+                    acts.push(Action::Rename(i));
+                }
+                resp.context_menu(|ui| {
+                    if ui.button("名前を変える").clicked() {
+                        acts.push(Action::Rename(i));
+                        ui.close();
+                    }
+                    if ui.button("差分を見る").clicked() {
+                        acts.push(Action::Diff(i));
+                        ui.close();
+                    }
+                    if ui.button(format!("{} で開く", self.cfg.editor_app)).clicked() {
+                        acts.push(Action::Editor(i));
+                        ui.close();
+                    }
+                    if ui.button("Finder で開く").clicked() {
+                        acts.push(Action::Finder(i));
+                        ui.close();
+                    }
+                    ui.separator();
+                    let label = if s.exit.is_some() { "一覧から外す" } else { "止める…" };
+                    if ui.button(RichText::new(label).color(BAD)).clicked() {
+                        acts.push(if s.exit.is_some() { Action::Remove(i) } else { Action::Kill(i) });
+                        ui.close();
+                    }
+                });
+                ui.add_space(8.0);
+            }
+        });
+        acts
+    }
+
+    fn header(&mut self, ui: &mut Ui) -> Vec<Action> {
+        let mut acts = Vec::new();
+        let i = self.sel;
+        let s = &self.sessions[i];
+        let branch = self.git_info.lock().unwrap().get(&s.cwd).and_then(|g| g.branch.clone()).or_else(|| s.branch.clone());
+        Frame::new().fill(HEADER_BG).inner_margin(Margin::symmetric(14, 9)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            // ボタンを右から先に置き、残りの幅に名前やフォルダを詰める（狭いときはフォルダを省略）
+            ui.allocate_ui_with_layout(vec2(ui.available_width(), 26.0), Layout::right_to_left(Align::Center), |ui| {
+                if s.exit.is_some() {
+                    if ui.button("一覧から外す").clicked() {
+                        acts.push(Action::Remove(i));
+                    }
+                } else if ui.button(RichText::new("止める").color(BAD)).on_hover_text("⌘W").clicked() {
+                    acts.push(Action::Kill(i));
+                }
+                if ui.button("エディタ").on_hover_text(format!("{} で開く", self.cfg.editor_app)).clicked() {
+                    acts.push(Action::Editor(i));
+                }
+                let on = self.diff.is_some();
+                if ui.selectable_label(on, "差分").on_hover_text("⌘D").clicked() {
+                    acts.push(Action::Diff(i));
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    status_chip(ui, s);
+                    ui.add(Label::new(RichText::new(&s.name).size(15.0).strong().color(TEXT)).truncate());
+                    ui.label(RichText::new(&s.agent).size(12.0).color(MUTED));
+                    if let Some(b) = branch {
+                        ui.label(RichText::new(b).size(12.0).color(MUTED));
+                    }
+                    ui.add(Label::new(RichText::new(tilde(&s.cwd)).size(12.0).color(FAINT)).truncate());
+                });
+            });
+        });
+        acts
+    }
+
+    fn diff_panel(&mut self, ui: &mut Ui) {
+        let Some(d) = &mut self.diff else { return };
+        let mut close = false;
+        let mut reload = false;
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("差分").size(15.0).strong().color(TEXT));
+            ui.label(RichText::new("コミットしていない変更").size(12.0).color(MUTED));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("閉じる").on_hover_text("⌘D").clicked() {
+                    close = true;
+                }
+                if ui.button("読み直す").clicked() {
+                    reload = true;
+                }
+            });
+        });
+        ui.add_space(6.0);
+        if let Some(e) = &d.diff.error {
+            ui.label(RichText::new(format!("git の状態を取れませんでした: {e}")).color(MUTED));
+        } else if d.diff.status.is_empty() {
+            ui.label(RichText::new("変更はありません").color(MUTED));
+        } else {
+            for l in d.diff.status.iter().take(30) {
+                let (code, path) = l.split_at(l.len().min(3));
+                let c = if code.contains('?') { FAINT } else if code.contains('D') { BAD } else if code.contains('A') { OK } else { WAITING };
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(code.trim()).font(FontId::monospace(12.0)).color(c));
+                    ui.label(RichText::new(path).size(12.0).color(TEXT));
+                });
+            }
+            if d.diff.status.len() > 30 {
+                ui.label(RichText::new(format!("ほか {} 件", d.diff.status.len() - 30)).size(12.0).color(MUTED));
+            }
+            ui.add_space(6.0);
+            ui.separator();
+            let font = FontId::monospace(12.0);
+            let row_h = ui.fonts(|f| f.row_height(&font)) + 2.0;
+            let lines = &d.diff.lines;
+            ScrollArea::both().auto_shrink([false, false]).show_rows(ui, row_h, lines.len(), |ui, range| {
+                for l in &lines[range] {
+                    let (fg, bg) = match l.kind {
+                        Kind::File => (TEXT, CARD_SEL),
+                        Kind::Meta => (FAINT, Color32::TRANSPARENT),
+                        Kind::Hunk => (ACCENT, Color32::TRANSPARENT),
+                        Kind::Add => (OK, Color32::from_rgba_unmultiplied(0x8f, 0xd1, 0x7f, 18)),
+                        Kind::Del => (BAD, Color32::from_rgba_unmultiplied(0xf0, 0x74, 0x7c, 18)),
+                        Kind::Plain => (TERM_FG.gamma_multiply(0.85), Color32::TRANSPARENT),
+                    };
+                    let mut text = RichText::new(&l.text).font(font.clone()).color(fg);
+                    if l.kind == Kind::File {
+                        text = text.strong();
+                    }
+                    Frame::new().fill(bg).show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.add(Label::new(text).extend());
+                    });
+                }
+            });
+        }
+        if close {
+            self.diff = None;
+        } else if reload {
+            let cwd = d.cwd.clone();
+            d.diff = git::diff(&cwd);
+        }
+    }
+
+    fn dialogs(&mut self, ctx: &egui::Context) {
+        if let Some(mut f) = self.new_form.take() {
+            let mut keep = true;
+            let mut submit = false;
+            let modal = egui::Modal::new(Id::new("new-session")).show(ctx, |ui| {
+                ui.set_width(520.0);
+                ui.label(RichText::new("新しいセッション").size(17.0).strong().color(TEXT));
+                ui.add_space(12.0);
+                ui.label(RichText::new("エージェント").size(12.0).color(MUTED));
+                ui.horizontal(|ui| {
+                    for (i, a) in self.cfg.agents.iter().enumerate() {
+                        if ui.selectable_label(f.agent == i, RichText::new(&a.name).size(14.0)).clicked() {
+                            f.agent = i;
+                        }
+                    }
+                });
+                ui.add_space(10.0);
+                ui.label(RichText::new("フォルダ").size(12.0).color(MUTED));
+                ui.horizontal(|ui| {
+                    let r = ui.add(TextEdit::singleline(&mut f.dir).desired_width(340.0).font(FontId::monospace(13.0)));
+                    if f.first {
+                        r.request_focus();
+                        f.first = false;
+                    }
+                    if ui.button("選ぶ…").clicked() {
+                        if let Some(p) = rfd::FileDialog::new().set_directory(expand(&f.dir)).pick_folder() {
+                            f.dir = tilde(&p);
+                        }
+                    }
+                    egui::ComboBox::from_id_salt("recent").selected_text("最近").width(70.0).show_ui(ui, |ui| {
+                        for r in &self.recent {
+                            if ui.selectable_label(false, r).clicked() {
+                                f.dir = r.clone();
+                            }
+                        }
+                    });
+                });
+                ui.add_space(10.0);
+                ui.label(RichText::new("ブランチ（任意）").size(12.0).color(MUTED));
+                ui.add(
+                    TextEdit::singleline(&mut f.branch)
+                        .desired_width(340.0)
+                        .font(FontId::monospace(13.0))
+                        .hint_text("入れると、そのブランチの worktree を作って起動"),
+                );
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(RichText::new("作る").strong()).fill(ACCENT.gamma_multiply(0.35))).clicked() {
+                        submit = true;
+                    }
+                    if ui.button("やめる").clicked() {
+                        keep = false;
+                    }
+                    ui.label(RichText::new("Enter で作る・Esc でやめる").size(11.0).color(FAINT));
+                });
+            });
+            if ctx.input(|i| i.key_pressed(Key::Enter)) {
+                submit = true;
+            }
+            if modal.should_close() {
+                keep = false;
+            }
+            if submit {
+                match self.create(&f) {
+                    Ok(()) => keep = false,
+                    Err(e) => self.flash(format!("{e:#}")),
+                }
+            }
+            if keep {
+                self.new_form = Some(f);
+            }
+        }
+
+        if let Some((i, mut name)) = self.rename.take() {
+            let mut keep = true;
+            let modal = egui::Modal::new(Id::new("rename")).show(ctx, |ui| {
+                ui.set_width(360.0);
+                ui.label(RichText::new("名前を変える").size(16.0).strong());
+                ui.add_space(8.0);
+                ui.add(TextEdit::singleline(&mut name).desired_width(f32::INFINITY)).request_focus();
+            });
+            if ctx.input(|i| i.key_pressed(Key::Enter)) {
+                if let Some(s) = self.sessions.get_mut(i) {
+                    if !name.trim().is_empty() {
+                        s.name = name.trim().to_string();
+                    }
+                }
+                keep = false;
+            }
+            if modal.should_close() {
+                keep = false;
+            }
+            if keep {
+                self.rename = Some((i, name));
+            }
+        }
+
+        if let Some(c) = self.confirm.take() {
+            let mut keep = true;
+            let mut yes = false;
+            let (title, body) = match &c {
+                Confirm::Kill(i) => (
+                    "止める".to_string(),
+                    format!("「{}」を止めます。worktree やファイルはそのまま残ります。", self.sessions.get(*i).map(|s| s.name.as_str()).unwrap_or("")),
+                ),
+                Confirm::Quit => ("終わる".to_string(), format!("動いているセッションが {} 個あります。全部止めて終わりますか？", self.alive())),
+            };
+            let modal = egui::Modal::new(Id::new("confirm")).show(ctx, |ui| {
+                ui.set_width(380.0);
+                ui.label(RichText::new(title).size(16.0).strong());
+                ui.add_space(8.0);
+                ui.label(body);
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(RichText::new("はい").color(BAD).strong())).clicked() {
+                        yes = true;
+                    }
+                    if ui.button("やめる").clicked() {
+                        keep = false;
+                    }
+                });
+            });
+            if ctx.input(|i| i.key_pressed(Key::Enter)) {
+                yes = true;
+            }
+            if modal.should_close() {
+                keep = false;
+            }
+            if yes {
+                match c {
+                    Confirm::Kill(i) => self.remove(i),
+                    Confirm::Quit => {
+                        self.allow_close = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
+            } else if keep {
+                self.confirm = Some(c);
+            }
+        }
+    }
+}
+
+impl eframe::App for MureApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.request_repaint_after(Duration::from_millis(120));
+        self.window_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        if let Some(shot) = &mut self.shot {
+            if shot.update(ctx) {
+                self.allow_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && self.alive() > 0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.confirm = Some(Confirm::Quit);
+        }
+
+        self.shortcuts(ctx);
+        self.tick();
+
+        let mut acts = Vec::new();
+        egui::SidePanel::left("sessions")
+            .resizable(true)
+            .default_width(280.0)
+            .width_range(200.0..=480.0)
+            .frame(Frame::new().fill(SIDEBAR_BG).inner_margin(Margin::same(12)))
+            .show(ctx, |ui| acts.extend(self.sidebar(ui)));
+
+        if self.diff.is_some() {
+            egui::SidePanel::right("diff")
+                .resizable(true)
+                .default_width(560.0)
+                .width_range(280.0..=1400.0)
+                .frame(Frame::new().fill(SIDEBAR_BG).inner_margin(Margin::same(12)))
+                .show(ctx, |ui| self.diff_panel(ui));
+        }
+
+        egui::CentralPanel::default().frame(Frame::new().fill(TERM_BG)).show(ctx, |ui| {
+            if self.sessions.is_empty() {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.32);
+                    ui.label(RichText::new("mure").size(34.0).strong().color(TEXT));
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("エージェントを並べて動かす").size(14.0).color(MUTED));
+                    ui.add_space(22.0);
+                    if ui.add(egui::Button::new(RichText::new("＋ 新しいセッション").size(16.0)).min_size(vec2(220.0, 40.0)).corner_radius(8.0)).clicked() {
+                        acts.push(Action::New);
+                    }
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("⌘N").size(12.0).color(FAINT));
+                });
+                return;
+            }
+            acts.extend(self.header(ui));
+            let accept = !self.dialog_open();
+            let sel = self.sel;
+            if let Some((rows, cols)) = term::show(ui, &mut self.sessions[sel], &mut self.term, accept) {
+                for s in &mut self.sessions {
+                    s.resize(rows, cols);
+                }
+            }
+        });
+
+        if let Some((msg, _)) = &self.flash {
+            egui::Area::new(Id::new("flash")).anchor(egui::Align2::CENTER_BOTTOM, vec2(0.0, -24.0)).show(ctx, |ui| {
+                Frame::new()
+                    .fill(Color32::from_rgb(0x3a, 0x30, 0x1c))
+                    .stroke(Stroke::new(1.0, WAITING))
+                    .corner_radius(8)
+                    .inner_margin(Margin::symmetric(14, 8))
+                    .show(ui, |ui| ui.label(RichText::new(msg).color(WAITING)));
+            });
+        }
+
+        for a in acts {
+            self.apply(a);
+        }
+        self.dialogs(ctx);
+    }
+}
+
+fn status_icon(ui: &mut Ui, s: &Session) {
+    if let Some(code) = s.exit {
+        let (t, c) = if code == 0 { ("✓", OK) } else { ("✕", BAD) };
+        ui.label(RichText::new(t).color(c).strong());
+    } else if s.attention {
+        ui.label(RichText::new("●").color(WAITING));
+    } else if s.busy {
+        ui.add(egui::Spinner::new().size(12.0).color(ACCENT));
+    } else {
+        ui.label(RichText::new("○").color(FAINT));
+    }
+}
+
+fn status_chip(ui: &mut Ui, s: &Session) {
+    let (t, c) = match s.exit {
+        Some(0) => ("終了".to_string(), OK),
+        Some(code) => (format!("終了 {code}"), BAD),
+        None if s.attention => ("待ち".into(), WAITING),
+        None if s.busy => ("実行中".into(), ACCENT),
+        None => ("静か".into(), MUTED),
+    };
+    Frame::new().fill(c.gamma_multiply(0.18)).corner_radius(10).inner_margin(Margin::symmetric(8, 2)).show(ui, |ui| {
+        ui.label(RichText::new(t).size(11.0).color(c).strong());
+    });
+}
+
+fn elapsed(secs: u64) -> String {
+    match secs {
+        0..60 => format!("{secs}秒"),
+        60..3600 => format!("{}分", secs / 60),
+        _ => format!("{}時間{}分", secs / 3600, secs / 60 % 60),
     }
 }
 
@@ -467,7 +782,7 @@ fn expand(s: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-pub fn tilde(p: &std::path::Path) -> String {
+pub fn tilde(p: &Path) -> String {
     let s = p.to_string_lossy().into_owned();
     if let Some(home) = std::env::var_os("HOME") {
         let home = home.to_string_lossy().into_owned();

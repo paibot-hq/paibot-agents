@@ -1,6 +1,9 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// 画面を描き直してほしいときに呼ぶ
+pub type Wake = Arc<dyn Fn() + Send + Sync>;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -42,7 +45,7 @@ impl Session {
         cwd: PathBuf,
         (rows, cols): (u16, u16),
         scrollback: usize,
-        dirty: Arc<AtomicBool>,
+        wake: Wake,
     ) -> Result<Self> {
         let pair = native_pty_system()
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
@@ -60,6 +63,11 @@ impl Session {
         cmd.cwd(&cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        cmd.env("TERM_PROGRAM", "mure");
+        // mure を Claude Code などの中から起動したとき、その印を子に引き継がない
+        for k in ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT", "TERM_PROGRAM_VERSION", "VSCODE_INJECTION"] {
+            cmd.env_remove(k);
+        }
         cmd.env("MURE", "1");
         cmd.env("MURE_SESSION", &name);
 
@@ -93,12 +101,12 @@ impl Session {
                                 let _ = w.flush();
                             }
                             *shared.last_output.lock().unwrap() = Instant::now();
-                            dirty.store(true, Ordering::Relaxed);
+                            wake();
                         }
                     }
                 }
                 shared.eof.store(true, Ordering::Relaxed);
-                dirty.store(true, Ordering::Relaxed);
+                wake();
             });
         }
 
@@ -157,6 +165,19 @@ impl Session {
         p.set_scrollback((cur + delta).max(0) as usize);
     }
 
+    /// 一覧のカードに出す、画面の中の意味のありそうな最後の1行
+    pub fn preview(&self) -> String {
+        let text = self.parser.lock().unwrap().screen().contents();
+        for line in text.lines().rev() {
+            let t = line.trim();
+            if t.is_empty() || is_chrome(t) {
+                continue;
+            }
+            return t.chars().take(120).collect();
+        }
+        String::new()
+    }
+
     pub fn last_output(&self) -> Instant {
         *self.shared.last_output.lock().unwrap()
     }
@@ -213,4 +234,17 @@ fn replies(data: &[u8], screen: &vt100::Screen) -> Vec<u8> {
         out.extend(b"\x1b[>0;10;1c");
     }
     out
+}
+
+/// 入力欄の枠や操作の説明など、中身ではない行
+fn is_chrome(t: &str) -> bool {
+    let n = t.chars().count();
+    let boxy = t.chars().filter(|c| ('\u{2500}'..='\u{259F}').contains(c)).count();
+    boxy * 2 > n
+        || t.starts_with('❯')
+        || t.starts_with('›')
+        || t.starts_with('>')
+        || t.contains("⏵⏵")
+        || t.contains("for shortcuts")
+        || t.contains("to cycle")
 }

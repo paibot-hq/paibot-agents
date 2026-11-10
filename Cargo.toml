@@ -1,19 +1,24 @@
 [package]
 name = "mure"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.86"
-description = "コーディングエージェントを並べて動かす、ちょうどいいターミナル"
+description = "コーディングエージェントを並べて動かすデスクトップアプリ"
 license = "MIT"
 
 [dependencies]
-ratatui = "0.29"
+eframe = "0.32"
 vt100 = "0.15"
 portable-pty = "0.8"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+rfd = "0.15"
+png = "0.17"
 
 [profile.release]
 lto = "thin"
 strip = true
+
+[profile.dev.package."*"]
+opt-level = 2
