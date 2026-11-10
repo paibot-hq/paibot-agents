@@ -71,13 +71,19 @@ fn default_agents() -> Vec<Agent> {
 }
 
 pub fn dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("MURE_CONFIG_DIR") {
+    if let Some(d) = std::env::var_os("PAISPACE_CONFIG_DIR") {
         return PathBuf::from(d);
     }
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"));
-    base.join("mure")
+    let dir = base.join("paispace");
+    // 以前の名前（mure）の設定とセッションの記録を引き継ぐ
+    let old = base.join("mure");
+    if !dir.exists() && old.is_dir() {
+        let _ = std::fs::rename(&old, &dir);
+    }
+    dir
 }
 
 pub fn path() -> PathBuf {
@@ -109,7 +115,7 @@ pub fn load() -> (Config, Option<String>) {
 pub fn save(c: &Config) -> Result<()> {
     std::fs::create_dir_all(dir())?;
     let body = toml::to_string_pretty(c)?;
-    std::fs::write(path(), format!("# mure の設定。mure の設定画面（⌘,）からも変えられます。\n\n{body}"))?;
+    std::fs::write(path(), format!("# paispace の設定。paispace の設定画面（⌘,）からも変えられます。\n\n{body}"))?;
     Ok(())
 }
 

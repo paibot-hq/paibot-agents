@@ -134,7 +134,7 @@ enum Action {
     Forget(usize),
 }
 
-pub struct MureApp {
+pub struct PaispaceApp {
     cfg: Config,
     sessions: Vec<Session>,
     sel: usize,
@@ -166,7 +166,7 @@ pub struct MureApp {
     window_focused: bool,
 }
 
-impl MureApp {
+impl PaispaceApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         cfg: Config,
@@ -237,7 +237,7 @@ impl MureApp {
             "diff" if !app.sessions.is_empty() => app.apply(Action::Diff(0)),
             "files" | "ask" | "quick" | "search" if !app.sessions.is_empty() => {
                 app.apply(Action::Files(0));
-                if let Ok(f) = std::env::var("MURE_SHOT_OPEN") {
+                if let Ok(f) = std::env::var("PAISPACE_SHOT_OPEN") {
                     let p = app.sessions[0].cwd.join(f);
                     app.apply(Action::Open(p, Some(30)));
                 }
@@ -254,7 +254,7 @@ impl MureApp {
                 }
                 if shot_ui == "search" {
                     app.side = Some(Side::Search);
-                    let q = std::env::var("MURE_SHOT_QUERY").unwrap_or_else(|_| "fn ".into());
+                    let q = std::env::var("PAISPACE_SHOT_QUERY").unwrap_or_else(|_| "fn ".into());
                     let cwd = app.sessions[0].cwd.clone();
                     if let Some(w) = app.cur_ws() {
                         w.search.set_and_run(&q, &cwd);
@@ -430,7 +430,7 @@ impl MureApp {
             })
             .collect();
         list.extend(self.dormant.iter().cloned());
-        if self.shot.is_none() || std::env::var_os("MURE_CONFIG_DIR").is_some() {
+        if self.shot.is_none() || std::env::var_os("PAISPACE_CONFIG_DIR").is_some() {
             resume::save(&list);
         }
     }
@@ -1178,7 +1178,7 @@ impl MureApp {
     }
 }
 
-impl eframe::App for MureApp {
+impl eframe::App for PaispaceApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_millis(120));
         self.window_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
@@ -1258,7 +1258,7 @@ impl eframe::App for MureApp {
                 ui::drag_area(ui, Rect::from_min_size(full.min, vec2(full.width(), 38.0)), "empty-drag");
                 ui.vertical_centered(|ui| {
                     ui.add_space((ui.available_height() * 0.28).max(40.0));
-                    ui.label(RichText::new("mure").font(ui::bold(30.0)).color(TEXT));
+                    ui.label(RichText::new("paispace").font(ui::bold(30.0)).color(TEXT));
                     ui.add_space(2.0);
                     ui.label(RichText::new("エージェントと一緒に書く").size(13.0).color(FAINT));
                     ui.add_space(26.0);

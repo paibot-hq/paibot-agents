@@ -26,15 +26,15 @@ use anyhow::Result;
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
 
 const HELP: &str = "\
-mure — コーディングエージェントを並べて動かすデスクトップアプリ
+paispace — コーディングエージェントを並べて動かすデスクトップアプリ
 
-使い方: mure [-a エージェント] [フォルダ | ワークスペース.code-workspace]
+使い方: paispace [-a エージェント] [フォルダ | ワークスペース.code-workspace]
 
   フォルダ          新しいセッションの最初のフォルダ（省略すると今いる場所）
   .code-workspace   VSCode のワークスペースを開き、そのフォルダから選ぶ
   -a エージェント   起動と同時にそのエージェントを1つ開く（claude / codex / shell など）
 
-設定は ~/.config/mure/config.toml";
+設定は ~/.config/paispace/config.toml";
 
 fn main() -> Result<()> {
     let mut dir = None;
@@ -47,11 +47,11 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             "-V" | "--version" => {
-                println!("mure {}", env!("CARGO_PKG_VERSION"));
+                println!("paispace {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             "-a" | "--agent" => start = Some(args.next().ok_or_else(|| anyhow::anyhow!("-a のあとにエージェント名が要ります"))?),
-            _ if dir.is_some() => anyhow::bail!("フォルダは1つだけ指定できます（mure --help）"),
+            _ if dir.is_some() => anyhow::bail!("フォルダは1つだけ指定できます（paispace --help）"),
             _ => dir = Some(PathBuf::from(a)),
         }
     }
@@ -83,7 +83,7 @@ fn main() -> Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("mure")
+            .with_title("paispace")
             // タイトルバーを消して、中身を一番上まで広げる（信号機ボタンだけ残る）
             .with_fullsize_content_view(true)
             .with_titlebar_shown(false)
@@ -93,11 +93,11 @@ fn main() -> Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "mure",
+        "paispace",
         options,
         Box::new(move |cc| {
             setup(&cc.egui_ctx);
-            Ok(Box::new(app::MureApp::new(cc, cfg, cfg_err, dir, start, open_picker)))
+            Ok(Box::new(app::PaispaceApp::new(cc, cfg, cfg_err, dir, start, open_picker)))
         }),
     )
     .map_err(|e| anyhow::anyhow!("ウィンドウを開けませんでした: {e}"))

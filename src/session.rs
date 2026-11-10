@@ -68,13 +68,13 @@ impl Session {
         cmd.cwd(&cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        cmd.env("TERM_PROGRAM", "mure");
-        // mure を Claude Code などの中から起動したとき、その印を子に引き継がない
+        cmd.env("TERM_PROGRAM", "paispace");
+        // paispace を Claude Code などの中から起動したとき、その印を子に引き継がない
         for k in ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT", "TERM_PROGRAM_VERSION", "VSCODE_INJECTION"] {
             cmd.env_remove(k);
         }
-        cmd.env("MURE", "1");
-        cmd.env("MURE_SESSION", &name);
+        cmd.env("PAISPACE", "1");
+        cmd.env("PAISPACE_SESSION", &name);
 
         let child = pair.slave.spawn_command(cmd).with_context(|| format!("{} を起動できませんでした", agent.name))?;
         drop(pair.slave);

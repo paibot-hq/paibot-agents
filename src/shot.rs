@@ -1,5 +1,5 @@
-//! 確認用: MURE_SHOT=<出力先.png> を付けて起動すると、MURE_SHOT_SECS 秒後に
-//! 自分の画面を PNG に書き出して終わる。MURE_SHOT_UI=new|diff でその画面を開いた状態にする。
+//! 確認用: PAISPACE_SHOT=<出力先.png> を付けて起動すると、PAISPACE_SHOT_SECS 秒後に
+//! 自分の画面を PNG に書き出して終わる。PAISPACE_SHOT_UI=new|diff でその画面を開いた状態にする。
 
 use std::time::{Duration, Instant};
 
@@ -14,13 +14,13 @@ pub struct Shot {
 
 impl Shot {
     pub fn from_env() -> Option<Self> {
-        let path = std::env::var("MURE_SHOT").ok()?;
-        let secs = std::env::var("MURE_SHOT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(4.0);
+        let path = std::env::var("PAISPACE_SHOT").ok()?;
+        let secs = std::env::var("PAISPACE_SHOT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(4.0);
         Some(Self {
             path,
             at: Instant::now() + Duration::from_secs_f64(secs),
             requested: false,
-            ui: std::env::var("MURE_SHOT_UI").unwrap_or_default(),
+            ui: std::env::var("PAISPACE_SHOT_UI").unwrap_or_default(),
         })
     }
 

@@ -1913,23 +1913,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mure"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "eframe",
- "egui-phosphor",
- "egui_extras",
- "png 0.17.16",
- "portable-pty",
- "rfd",
- "serde",
- "serde_json",
- "toml",
- "vt100",
-]
-
-[[package]]
 name = "naga"
 version = "25.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2374,6 +2357,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36820e9051aca1014ddc75770aab4d68bc1e9e632f0f5627c4086bc216fb583b"
 dependencies = [
  "ttf-parser",
+]
+
+[[package]]
+name = "paispace"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "eframe",
+ "egui-phosphor",
+ "egui_extras",
+ "png 0.17.16",
+ "portable-pty",
+ "rfd",
+ "serde",
+ "serde_json",
+ "toml",
+ "vt100",
 ]
 
 [[package]]
