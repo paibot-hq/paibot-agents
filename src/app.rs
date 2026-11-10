@@ -1141,6 +1141,7 @@ impl PaispaceApp {
                     children::Kind::Codex => map::CODEX,
                     children::Kind::Claude => map::CLAUDE,
                     children::Kind::ClaudeSub => map::SUB,
+                    children::Kind::Agy => map::AGY,
                 },
                 id: c.id,
                 label: c.label,
@@ -1205,6 +1206,7 @@ impl PaispaceApp {
                 children::Kind::Codex => l!("コマンドで呼ばれた codex", "codex called by a command"),
                 children::Kind::Claude => l!("コマンドで呼ばれた claude", "claude called by a command"),
                 children::Kind::ClaudeSub => l!("claude の子エージェント", "claude subagent"),
+                children::Kind::Agy => l!("agy（Antigravity）", "agy (Antigravity)"),
             };
             ui.label(RichText::new(how).size(11.0).color(FAINT));
             let (t, c) = if v.done { (l!("終わった", "Done"), OK) } else if running { (l!("動いています", "Running"), ACCENT) } else { (l!("途中で止まった", "Stopped midway"), WAITING) };

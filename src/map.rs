@@ -13,6 +13,7 @@ use crate::ui;
 pub const CLAUDE: Color32 = Color32::from_rgb(0xe8, 0x93, 0x72);
 pub const CODEX: Color32 = Color32::from_rgb(0x5c, 0xc8, 0xb0);
 pub const SUB: Color32 = Color32::from_rgb(0xb3, 0x9b, 0xff);
+pub const AGY: Color32 = Color32::from_rgb(0x7a, 0xa7, 0xf5);
 pub const OTHER: Color32 = Color32::from_rgb(0x9b, 0xa3, 0xb5);
 
 #[derive(Clone, Copy, PartialEq)]
@@ -254,7 +255,7 @@ pub fn show(ui: &mut Ui, lanes: &[Lane], window: &mut Window, view: &mut View) -
     // 凡例
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
-        for (c, name) in [(CLAUDE, "claude"), (CODEX, "codex"), (SUB, l!("子エージェント", "Subagent")), (OTHER, l!("そのほか", "Other"))] {
+        for (c, name) in [(CLAUDE, "claude"), (CODEX, "codex"), (AGY, "agy"), (SUB, l!("子エージェント", "Subagent")), (OTHER, l!("そのほか", "Other"))] {
             let (r, _) = ui.allocate_exact_size(vec2(18.0, 10.0), Sense::hover());
             ui.painter().rect_filled(r.shrink2(vec2(0.0, 1.5)), 4.0, c.gamma_multiply(0.8));
             ui.label(egui::RichText::new(name).size(11.0).color(MUTED));

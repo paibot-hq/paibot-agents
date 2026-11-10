@@ -1,5 +1,6 @@
 #[macro_use]
 mod i18n;
+mod agy;
 mod app;
 mod children;
 mod config;

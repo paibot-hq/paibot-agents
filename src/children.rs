@@ -30,6 +30,8 @@ pub enum Kind {
     Claude,
     /// claude が自分の中で立てた子エージェント
     ClaudeSub,
+    /// agy（Antigravity CLI）。agy が立てた子エージェントも
+    Agy,
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +121,7 @@ pub fn read_steps(kind: Kind, file: &Path) -> (Vec<Step>, bool) {
     match kind {
         Kind::Codex => read_codex_steps(file),
         Kind::Claude | Kind::ClaudeSub => read_claude_steps(file),
+        Kind::Agy => crate::agy::read(file).map(|c| (c.steps, c.done)).unwrap_or_default(),
     }
 }
 
@@ -518,6 +521,7 @@ fn evidence(commands: &[String], c: &Child) -> u8 {
     let name = match c.kind {
         Kind::Codex => "codex",
         Kind::Claude | Kind::ClaudeSub => "claude",
+        Kind::Agy => "agy",
     };
     if commands.iter().any(|cmd| cmd.contains(name)) { 1 } else { 0 }
 }
@@ -641,6 +645,8 @@ pub fn spawn_watcher(watch: Arc<Mutex<Watch>>, out: Arc<Mutex<Vec<Child>>>, sess
         let mut codex_cache = HashMap::new();
         let mut claude_cache = HashMap::new();
         let mut cmd_cache: HashMap<PathBuf, (SystemTime, Vec<String>)> = HashMap::new();
+        let mut agy_cache = HashMap::new();
+        let agy_root = crate::agy::root();
         let croot = codex_root();
         let claude = claude_root();
         loop {
@@ -648,6 +654,7 @@ pub fn spawn_watcher(watch: Arc<Mutex<Watch>>, out: Arc<Mutex<Vec<Child>>>, sess
             if let Some(since) = w.since {
                 let mut found = scan_codex(&croot, since, &mut codex_cache);
                 found.extend(scan_claude(&claude, &w, &mut claude_cache));
+                found.extend(crate::agy::scan(&agy_root, since, &w.dirs, &mut agy_cache));
                 found.sort_by_key(|c| c.started);
                 // セッション自身のコマンド（どの子を呼んだかの手がかり）
                 let mut cmds = HashMap::new();
