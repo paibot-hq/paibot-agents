@@ -202,6 +202,7 @@ pub struct PaispaceApp {
     children_watch: Arc<Mutex<children::Watch>>,
     child_view: Option<ChildView>,
     map_window: crate::map::Window,
+    map_view: crate::map::View,
     wake: Wake,
     allow_close: bool,
     shot: Option<crate::shot::Shot>,
@@ -257,6 +258,7 @@ impl PaispaceApp {
             children_watch: kids_watch,
             child_view: None,
             map_window: crate::map::Window::All,
+            map_view: crate::map::View::Graph,
             wake,
             allow_close: false,
             shot: crate::shot::Shot::from_env(),
@@ -1579,8 +1581,10 @@ impl eframe::App for PaispaceApp {
                     Side::Child => self.child_panel(ui),
                     Side::Map => {
                         let lanes = self.map_lanes();
-                        if let Some(id) = crate::map::show(ui, &lanes, &mut self.map_window) {
-                            acts.push(Action::Child(id));
+                        match crate::map::show(ui, &lanes, &mut self.map_window, &mut self.map_view) {
+                            Some(crate::map::Click::Kid(id)) => acts.push(Action::Child(id)),
+                            Some(crate::map::Click::Lane(i)) => acts.push(Action::Select(i)),
+                            None => {}
                         }
                     }
                     Side::Files | Side::Search => {
