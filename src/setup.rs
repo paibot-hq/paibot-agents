@@ -126,7 +126,7 @@ impl Setup {
         let modal = egui::Modal::new(Id::new("setup")).show(ctx, |ui| {
             ui.set_width(640.0_f32.min(screen.width() - 80.0));
             let title = if self.first_run { "はじめに" } else { "設定" };
-            ui.label(RichText::new(title).size(20.0).strong().color(TEXT));
+            ui.label(RichText::new(title).font(crate::ui::bold(19.0)).color(TEXT));
             if self.first_run {
                 ui.add_space(4.0);
                 ui.label(RichText::new("ここで決めたことは、あとから ⌘, でいつでも変えられます。").color(MUTED));
@@ -295,7 +295,10 @@ impl Setup {
             ui.add_space(14.0);
             ui.horizontal(|ui| {
                 let label = if self.first_run { "はじめる" } else { "保存" };
-                let ok = egui::Button::new(RichText::new(label).strong().size(14.0)).min_size(vec2(110.0, 32.0)).fill(ACCENT.gamma_multiply(0.35));
+                let ok = egui::Button::new(RichText::new(format!("{}  {label}", crate::ui::icon::CHECK)).size(13.5).color(egui::Color32::WHITE))
+                    .min_size(vec2(110.0, 32.0))
+                    .corner_radius(7.0)
+                    .fill(ACCENT.gamma_multiply(0.55));
                 let has_agent = self.rows.iter().any(|r| r.on && !r.agent.name.trim().is_empty());
                 if ui.add_enabled(has_agent, ok).clicked() {
                     out = Outcome::Save(self.build());
@@ -338,7 +341,7 @@ impl Setup {
 }
 
 fn section(ui: &mut egui::Ui, title: &str, sub: &str) {
-    ui.label(RichText::new(title).size(14.0).strong().color(TEXT));
+    ui.label(RichText::new(title).font(crate::ui::bold(13.5)).color(TEXT));
     if !sub.is_empty() {
         ui.label(RichText::new(sub).size(12.0).color(MUTED));
     }

@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use eframe::egui::{
-    self, Align, Color32, CornerRadius, FontId, Frame, Id, Key, Label, Layout, Margin, Modifiers, RichText, ScrollArea,
-    Sense, Stroke, TextEdit, Ui, vec2,
+    self, Align, Color32, CornerRadius, FontId, Frame, Id, Key, Label, Layout, Margin, Modifiers, Rect, RichText,
+    ScrollArea, Sense, Stroke, TextEdit, Ui, vec2,
 };
 
 use crate::config::{self, Agent, Config};
@@ -23,6 +23,7 @@ use crate::session::{Session, Wake};
 use crate::setup::{self, Setup};
 use crate::term::{self, TermState};
 use crate::theme::*;
+use crate::ui;
 use crate::util::{expand, open_in};
 pub use crate::util::tilde;
 
@@ -658,81 +659,92 @@ impl MureApp {
 
     fn sidebar(&mut self, ui: &mut Ui) -> Vec<Action> {
         let mut acts = Vec::new();
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("mure").size(18.0).strong().color(TEXT));
-            let busy = self.sessions.iter().filter(|s| s.busy).count();
-            let waiting = self.sessions.iter().filter(|s| s.attention).count();
-            if busy > 0 {
-                ui.label(RichText::new(format!("実行 {busy}")).size(12.0).color(ACCENT));
-            }
-            if waiting > 0 {
-                ui.label(RichText::new(format!("待ち {waiting}")).size(12.0).color(WAITING));
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add(egui::Button::new(RichText::new("＋ 新規").size(13.0)).corner_radius(6.0)).on_hover_text("⌘N").clicked() {
-                    acts.push(Action::New);
-                }
-            });
-        });
-        ui.add_space(10.0);
+        // 上の帯（左に信号機ボタンが乗る）
+        let top = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover()).0;
+        ui::drag_area(ui, top, "side-drag");
+        let mut top_ui = ui.new_child(egui::UiBuilder::new().max_rect(top).layout(Layout::right_to_left(Align::Center)));
+        if ui::icon_button(&mut top_ui, ui::icon::PLUS, "新しいセッション  ⌘N", false).clicked() {
+            acts.push(Action::New);
+        }
+        ui.add_space(14.0);
 
-        egui::TopBottomPanel::bottom("sidebar-foot").frame(Frame::new().inner_margin(Margin { top: 8, ..Default::default() })).show_separator_line(false).show_inside(ui, |ui| {
-            if ui.add(egui::Button::new(RichText::new("設定").size(12.0).color(MUTED)).frame(false)).on_hover_text("⌘,").clicked() {
-                acts.push(Action::Settings);
-            }
-        });
-
-        if !self.dormant.is_empty() {
-            egui::TopBottomPanel::bottom("dormant")
-                .frame(Frame::new().inner_margin(Margin { top: 8, ..Default::default() }))
-                .show_separator_line(true)
-                .show_inside(ui, |ui| {
+        // 下: 前回のセッションと設定
+        egui::TopBottomPanel::bottom("sidebar-foot")
+            .frame(Frame::new().inner_margin(Margin { top: 6, ..Default::default() }))
+            .show_separator_line(false)
+            .show_inside(ui, |ui| {
+                if !self.dormant.is_empty() {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("前回のセッション").size(12.0).strong().color(MUTED));
+                        ui::section(ui, "前回のセッション");
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.small_button("全部再開").clicked() {
+                            let r = ui.add(egui::Button::new(RichText::new("全部再開").size(11.0).color(MUTED)).frame(false));
+                            if r.clicked() {
                                 acts.push(Action::ResumeAll);
                             }
                         });
                     });
-                    ui.add_space(4.0);
-                    ScrollArea::vertical().id_salt("dormant-list").max_height(260.0).show(ui, |ui| {
+                    ui.add_space(2.0);
+                    ScrollArea::vertical().id_salt("dormant-list").max_height(220.0).show(ui, |ui| {
+                        ui.spacing_mut().interact_size.y = 18.0;
+                        ui.spacing_mut().item_spacing.y = 2.0;
                         for (i, d) in self.dormant.iter().enumerate() {
                             let id = Id::new(("dormant", i));
                             let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
                             let inner = Frame::new()
                                 .fill(if hovered { CARD_HOVER } else { Color32::TRANSPARENT })
-                                .stroke(Stroke::new(1.0, BORDER))
-                                .corner_radius(8)
-                                .inner_margin(Margin::symmetric(10, 6))
+                                .corner_radius(7)
+                                .inner_margin(Margin::symmetric(8, 5))
                                 .show(ui, |ui| {
                                     ui.set_width(ui.available_width());
                                     ui.horizontal(|ui| {
-                                        ui.label(RichText::new("◇").color(FAINT));
-                                        ui.add(Label::new(RichText::new(&d.name).size(13.0).color(TEXT)).truncate());
+                                        let g = if d.resumable() { ui::icon::ARROW_COUNTER_CLOCKWISE } else { ui::icon::PLAY };
+                                        ui.label(RichText::new(g).size(13.0).color(if hovered { ACCENT } else { FAINT }));
+                                        ui.add(Label::new(RichText::new(&d.name).size(13.0).color(MUTED)).truncate());
                                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                            if ui.add(egui::Button::new(RichText::new("×").color(FAINT)).frame(false)).on_hover_text("忘れる").clicked() {
+                                            if hovered
+                                                && ui.add(egui::Button::new(RichText::new(ui::icon::X).size(12.0).color(FAINT)).frame(false)).on_hover_text("忘れる").clicked()
+                                            {
                                                 acts.push(Action::Forget(i));
                                             }
+                                            ui.label(RichText::new(&d.agent).size(11.0).color(FAINT));
                                         });
                                     });
-                                    let how = if d.resumable() { "続きから" } else { "開き直す" };
-                                    let tabs = if d.tabs.is_empty() { String::new() } else { format!(" · ファイル {}", d.tabs.len()) };
-                                    ui.add(Label::new(RichText::new(format!("{} · {how}{tabs}", d.agent)).size(11.0).color(FAINT)).truncate());
                                 });
-                            let r = ui.interact(inner.response.rect, id, Sense::click()).on_hover_text(format!("{}\nクリックで再開", tilde(&d.cwd)));
+                            let how = if d.resumable() { "会話の続きから再開" } else { "同じフォルダで開き直す" };
+                            let r = ui.interact(inner.response.rect, id, Sense::click()).on_hover_text(format!("{}\n{how}", tilde(&d.cwd)));
                             if r.clicked() {
                                 acts.push(Action::Resume(i));
                             }
-                            ui.add_space(4.0);
                         }
                     });
+                    ui.add_space(6.0);
+                }
+                ui.horizontal(|ui| {
+                    let r = ui.add(egui::Button::new(RichText::new(format!("{}  設定", ui::icon::GEAR_SIX)).size(12.0).color(FAINT)).frame(false));
+                    if r.on_hover_text("⌘,").clicked() {
+                        acts.push(Action::Settings);
+                    }
                 });
-        }
+            });
+
+        ui.horizontal(|ui| {
+            ui::section(ui, "セッション");
+            let busy = self.sessions.iter().filter(|s| s.busy).count();
+            let waiting = self.sessions.iter().filter(|s| s.attention).count();
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if waiting > 0 {
+                    ui.label(RichText::new(format!("待ち {waiting}")).size(11.0).color(WAITING));
+                }
+                if busy > 0 {
+                    ui.label(RichText::new(format!("動作中 {busy}")).size(11.0).color(ACCENT));
+                }
+            });
+        });
+        ui.add_space(4.0);
 
         if self.sessions.is_empty() {
-            ui.label(RichText::new("セッションはまだありません").color(MUTED));
+            ui.add_space(6.0);
+            ui.label(RichText::new("まだありません").size(12.0).color(FAINT));
             return acts;
         }
 
@@ -744,56 +756,64 @@ impl MureApp {
                 let id = Id::new(("card", i));
                 let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
                 let fill = if selected { CARD_SEL } else if hovered { CARD_HOVER } else { CARD };
-                let stroke = if s.attention && !selected {
-                    Stroke::new(1.0, WAITING)
-                } else if selected {
-                    Stroke::new(1.0, ACCENT.gamma_multiply(0.5))
-                } else {
-                    Stroke::new(1.0, BORDER)
-                };
-                let inner = Frame::new()
-                    .fill(fill)
-                    .stroke(stroke)
-                    .corner_radius(CornerRadius::same(8))
-                    .inner_margin(Margin::symmetric(12, 10))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            status_icon(ui, s);
-                            ui.add(Label::new(RichText::new(&s.name).size(14.0).strong().color(if s.exit.is_some() { MUTED } else { TEXT })).truncate());
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if i < 9 {
-                                    ui.label(RichText::new(format!("⌘{}", i + 1)).size(11.0).color(FAINT));
-                                }
-                            });
+                let inner = Frame::new().fill(fill).corner_radius(CornerRadius::same(8)).inner_margin(Margin { left: 10, right: 10, top: 8, bottom: 8 }).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    ui.spacing_mut().interact_size.y = 16.0;
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui::status_dot(ui, s);
+                        let col = if s.exit.is_some() { MUTED } else { TEXT };
+                        ui.add(Label::new(RichText::new(&s.name).font(ui::bold(13.5)).color(col)).truncate());
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if i < 9 && (hovered || selected) {
+                                ui.label(RichText::new(format!("⌘{}", i + 1)).size(10.5).color(FAINT));
+                            }
                         });
-                        let g = info.get(&s.cwd);
-                        let mut meta = vec![s.agent.clone()];
+                    });
+                    let g = info.get(&s.cwd);
+                    ui.horizontal(|ui| {
+                        ui.add_space(20.0);
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        let mut meta = s.agent.clone();
                         if let Some(b) = g.and_then(|g| g.branch.clone()).or_else(|| s.branch.clone()) {
                             if b != s.name {
-                                meta.push(b);
+                                meta.push_str(&format!("  {} {b}", ui::icon::GIT_BRANCH));
                             }
                         }
-                        meta.push(match s.exit {
-                            Some(code) => format!("終了 ({code})"),
+                        let t = match s.exit {
+                            Some(code) => format!("終了 {code}"),
                             None => elapsed(now.duration_since(s.created).as_secs()),
-                        });
-                        ui.add(Label::new(RichText::new(meta.join(" · ")).size(12.0).color(MUTED)).truncate());
-                        let pv = s.preview();
-                        if !pv.is_empty() {
-                            ui.add_space(2.0);
-                            ui.add(Label::new(RichText::new(pv).font(FontId::monospace(11.0)).color(FAINT)).truncate());
-                        }
-                        if let Some(g) = g.filter(|g| g.files > 0) {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 6.0;
-                                ui.label(RichText::new(format!("+{}", g.added)).size(11.0).color(OK));
-                                ui.label(RichText::new(format!("−{}", g.removed)).size(11.0).color(BAD));
-                                ui.label(RichText::new(format!("{} ファイル", g.files)).size(11.0).color(FAINT));
-                            });
-                        }
+                        };
+                        meta.push_str(&format!("  ·  {t}"));
+                        ui.add(Label::new(RichText::new(meta).size(11.5).color(FAINT)).truncate());
                     });
-                let resp = ui.interact(inner.response.rect, id, Sense::click());
+                    let pv = s.preview();
+                    if !pv.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.add_space(20.0);
+                            ui.add(Label::new(RichText::new(pv).font(FontId::monospace(10.5)).color(MUTED.gamma_multiply(0.8))).truncate());
+                        });
+                    }
+                    if let Some(g) = g.filter(|g| g.files > 0) {
+                        ui.horizontal(|ui| {
+                            ui.add_space(20.0);
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            ui.label(RichText::new(format!("+{}", g.added)).font(FontId::monospace(10.5)).color(OK.gamma_multiply(0.85)));
+                            ui.label(RichText::new(format!("−{}", g.removed)).font(FontId::monospace(10.5)).color(BAD.gamma_multiply(0.85)));
+                            ui.label(RichText::new(format!("{} ファイル", g.files)).size(10.5).color(FAINT));
+                        });
+                    }
+                });
+                let rect = inner.response.rect;
+                if selected {
+                    let bar = Rect::from_min_size(rect.left_top() + vec2(0.0, 9.0), vec2(2.5, rect.height() - 18.0));
+                    ui.painter().rect_filled(bar, 2.0, ACCENT);
+                } else if s.attention {
+                    let bar = Rect::from_min_size(rect.left_top() + vec2(0.0, 9.0), vec2(2.5, rect.height() - 18.0));
+                    ui.painter().rect_filled(bar, 2.0, WAITING);
+                }
+                let resp = ui.interact(rect, id, Sense::click());
                 if resp.clicked() {
                     acts.push(Action::Select(i));
                 }
@@ -801,79 +821,117 @@ impl MureApp {
                     acts.push(Action::Rename(i));
                 }
                 resp.context_menu(|ui| {
-                    if ui.button("名前を変える").clicked() {
+                    let item = |ui: &mut Ui, g: &str, t: &str| ui.button(format!("{g}  {t}")).clicked();
+                    if item(ui, ui::icon::PENCIL_SIMPLE, "名前を変える") {
                         acts.push(Action::Rename(i));
                         ui.close();
                     }
-                    if ui.button("ファイルを見る").clicked() {
+                    if item(ui, ui::icon::FOLDER_SIMPLE, "ファイル") {
                         acts.push(Action::Files(i));
                         ui.close();
                     }
-                    if ui.button("差分を見る").clicked() {
+                    if item(ui, ui::icon::GIT_DIFF, "差分") {
                         acts.push(Action::Diff(i));
                         ui.close();
                     }
-                    if ui.button(format!("{} で開く", self.cfg.editor_app)).clicked() {
+                    if item(ui, ui::icon::CODE, &format!("{} で開く", self.cfg.editor_app)) {
                         acts.push(Action::Editor(i));
                         ui.close();
                     }
-                    if ui.button("Finder で開く").clicked() {
+                    if item(ui, ui::icon::FOLDER_OPEN, "Finder で開く") {
                         acts.push(Action::Finder(i));
                         ui.close();
                     }
                     ui.separator();
                     let label = if s.exit.is_some() { "一覧から外す" } else { "止める…" };
-                    if ui.button(RichText::new(label).color(BAD)).clicked() {
+                    if ui.button(RichText::new(format!("{}  {label}", ui::icon::STOP)).color(BAD)).clicked() {
                         acts.push(if s.exit.is_some() { Action::Remove(i) } else { Action::Kill(i) });
                         ui.close();
                     }
                 });
-                ui.add_space(8.0);
+                ui.add_space(2.0);
             }
         });
         acts
     }
 
-    fn header(&mut self, ui: &mut Ui) -> Vec<Action> {
+    /// 上の帯: タブ（エージェント＋ファイル）と、右側の操作
+    fn top_bar(&mut self, ui: &mut Ui) -> (Vec<Action>, Option<TabAct>) {
         let mut acts = Vec::new();
+        let mut tab_act = None;
         let i = self.sel;
+        let cwd = self.sessions[i].cwd.clone();
+        let w = self.ws.entry(cwd.clone()).or_insert_with(|| Workspace::new(cwd.clone()));
         let s = &self.sessions[i];
         let branch = self.git_info.lock().unwrap().get(&s.cwd).and_then(|g| g.branch.clone()).or_else(|| s.branch.clone());
-        Frame::new().fill(HEADER_BG).inner_margin(Margin::symmetric(14, 9)).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            // ボタンを右から先に置き、残りの幅に名前やフォルダを詰める（狭いときはフォルダを省略）
-            ui.allocate_ui_with_layout(vec2(ui.available_width(), 26.0), Layout::right_to_left(Align::Center), |ui| {
-                if s.exit.is_some() {
-                    if ui.button("一覧から外す").clicked() {
-                        acts.push(Action::Remove(i));
+        let bar = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), 38.0));
+        ui.painter().rect_filled(bar, 0.0, TOPBAR_BG);
+        ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, HAIRLINE));
+        ui::drag_area(ui, bar, "top-drag");
+        let mut bar_ui = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(8.0, 0.0))).layout(Layout::right_to_left(Align::Center)));
+        ui.advance_cursor_after_rect(bar);
+        let ui = &mut bar_ui;
+
+        // 右側の操作
+        if s.exit.is_some() {
+            if ui::icon_button(ui, ui::icon::X, "一覧から外す", false).clicked() {
+                acts.push(Action::Remove(i));
+            }
+        } else if ui::icon_button_colored(ui, ui::icon::STOP, "止める  ⌘W", false, Some(BAD)).clicked() {
+            acts.push(Action::Kill(i));
+        }
+        if ui::icon_button(ui, ui::icon::CODE, &format!("{} で開く", self.cfg.editor_app), false).clicked() {
+            acts.push(Action::Editor(i));
+        }
+        ui.add_space(4.0);
+        ui.painter().vline(ui.cursor().right() - 2.0, bar.y_range().shrink(11.0), Stroke::new(1.0, BORDER));
+        ui.add_space(6.0);
+        if ui::icon_button(ui, ui::icon::GIT_DIFF, "差分  ⌘D", self.side == Some(Side::Diff)).clicked() {
+            acts.push(Action::Diff(i));
+        }
+        if ui::icon_button(ui, ui::icon::MAGNIFYING_GLASS, "検索  ⌘⇧F", self.side == Some(Side::Search)).clicked() {
+            acts.push(Action::Search(i));
+        }
+        if ui::icon_button(ui, ui::icon::FOLDER_SIMPLE, "ファイル  ⌘E", self.side == Some(Side::Files)).clicked() {
+            acts.push(Action::Files(i));
+        }
+        ui.add_space(8.0);
+
+        // 左側のタブ
+        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            ScrollArea::horizontal().id_salt("tabs").scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    let (st, sc) = ui::status_text(s);
+                    let mut label = format!("{}  {}", ui::icon::TERMINAL_WINDOW, s.name);
+                    if let Some(b) = &branch {
+                        if *b != s.name {
+                            label.push_str(&format!("   {} {b}", ui::icon::GIT_BRANCH));
+                        }
                     }
-                } else if ui.button(RichText::new("止める").color(BAD)).on_hover_text("⌘W").clicked() {
-                    acts.push(Action::Kill(i));
-                }
-                if ui.button("エディタ").on_hover_text(format!("{} で開く", self.cfg.editor_app)).clicked() {
-                    acts.push(Action::Editor(i));
-                }
-                if ui.selectable_label(self.side == Some(Side::Diff), "差分").on_hover_text("⌘D").clicked() {
-                    acts.push(Action::Diff(i));
-                }
-                if ui.selectable_label(self.side == Some(Side::Search), "検索").on_hover_text("⌘⇧F").clicked() {
-                    acts.push(Action::Search(i));
-                }
-                if ui.selectable_label(self.side == Some(Side::Files), "ファイル").on_hover_text("⌘E").clicked() {
-                    acts.push(Action::Files(i));
-                }
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    status_chip(ui, s);
-                    ui.add(Label::new(RichText::new(&s.name).size(15.0).strong().color(TEXT)).truncate());
-                    ui.label(RichText::new(&s.agent).size(12.0).color(MUTED));
-                    if let Some(b) = branch {
-                        ui.label(RichText::new(b).size(12.0).color(MUTED));
+                    let r = tab(ui, w.active.is_none(), &label, if s.attention { Some(WAITING) } else { None }, false)
+                        .on_hover_text(format!("{} · {}\n{}\n{}", s.agent, st, tilde(&s.cwd), if s.attention { "こちらを待っています" } else { "" }));
+                    let _ = sc;
+                    if r.clicked() {
+                        tab_act = Some(TabAct::Select(None));
                     }
-                    ui.add(Label::new(RichText::new(tilde(&s.cwd)).size(12.0).color(FAINT)).truncate());
+                    for (di, d) in w.docs.iter().enumerate() {
+                        let on = w.active == Some(di);
+                        let r = tab(ui, on, &d.title(), None, d.dirty()).on_hover_text(d.path.to_string_lossy());
+                        if r.clicked() {
+                            tab_act = Some(TabAct::Select(Some(di)));
+                        }
+                        if r.middle_clicked() {
+                            tab_act = Some(TabAct::Close(di));
+                        }
+                        if (on || r.hovered()) && ui.add(egui::Button::new(RichText::new(ui::icon::X).size(11.0).color(FAINT)).frame(false)).on_hover_text("閉じる  ⌘W").clicked() {
+                            tab_act = Some(TabAct::Close(di));
+                        }
+                    }
                 });
             });
         });
-        acts
+        (acts, tab_act)
     }
 
     fn diff_panel(&mut self, ui: &mut Ui) {
@@ -1145,9 +1203,10 @@ impl eframe::App for MureApp {
         let mut acts = Vec::new();
         egui::SidePanel::left("sessions")
             .resizable(true)
-            .default_width(280.0)
-            .width_range(200.0..=480.0)
-            .frame(Frame::new().fill(SIDEBAR_BG).inner_margin(Margin::same(12)))
+            .default_width(272.0)
+            .width_range(210.0..=480.0)
+            .show_separator_line(false)
+            .frame(Frame::new().fill(SIDEBAR_BG).inner_margin(Margin { left: 10, right: 10, top: 4, bottom: 10 }).stroke(Stroke::new(1.0, HAIRLINE)))
             .show(ctx, |ui| acts.extend(self.sidebar(ui)));
 
         if let Some(side) = self.side.filter(|_| !self.sessions.is_empty()) {
@@ -1155,7 +1214,8 @@ impl eframe::App for MureApp {
                 .resizable(true)
                 .default_width(600.0)
                 .width_range(280.0..=1400.0)
-                .frame(Frame::new().fill(SIDEBAR_BG).inner_margin(Margin::same(12)))
+                .show_separator_line(false)
+                .frame(Frame::new().fill(SIDEBAR_BG).inner_margin(Margin { left: 12, right: 12, top: 6, bottom: 10 }).stroke(Stroke::new(1.0, HAIRLINE)))
                 .show(ctx, |ui| match side {
                     Side::Diff => self.diff_panel(ui),
                     Side::Files | Side::Search => {
@@ -1163,12 +1223,12 @@ impl eframe::App for MureApp {
                         let mut close = false;
                         ui.horizontal(|ui| {
                             let title = if side == Side::Files { "ファイル" } else { "検索" };
-                            ui.label(RichText::new(title).size(15.0).strong().color(TEXT));
+                            ui.label(RichText::new(title).font(ui::bold(13.5)).color(TEXT));
                             if side == Side::Files {
                                 ui.label(RichText::new("⌘P で名前から開く").size(11.0).color(FAINT));
                             }
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.button("閉じる").clicked() {
+                                if ui::icon_button(ui, ui::icon::X, "閉じる", false).clicked() {
                                     close = true;
                                 }
                             });
@@ -1194,33 +1254,49 @@ impl eframe::App for MureApp {
 
         egui::CentralPanel::default().frame(Frame::new().fill(TERM_BG)).show(ctx, |ui| {
             if self.sessions.is_empty() {
+                let full = ui.max_rect();
+                ui::drag_area(ui, Rect::from_min_size(full.min, vec2(full.width(), 38.0)), "empty-drag");
                 ui.vertical_centered(|ui| {
-                    ui.add_space(ui.available_height() * 0.32);
-                    ui.label(RichText::new("mure").size(34.0).strong().color(TEXT));
-                    ui.add_space(6.0);
-                    ui.label(RichText::new("エージェントを並べて動かす").size(14.0).color(MUTED));
-                    ui.add_space(22.0);
-                    if ui.add(egui::Button::new(RichText::new("＋ 新しいセッション").size(16.0)).min_size(vec2(220.0, 40.0)).corner_radius(8.0)).clicked() {
+                    ui.add_space((ui.available_height() * 0.28).max(40.0));
+                    ui.label(RichText::new("mure").font(ui::bold(30.0)).color(TEXT));
+                    ui.add_space(2.0);
+                    ui.label(RichText::new("エージェントと一緒に書く").size(13.0).color(FAINT));
+                    ui.add_space(26.0);
+                    let row = |ui: &mut Ui, g: &str, t: &str, k: &str| -> bool {
+                        let (rect, r) = ui.allocate_exact_size(vec2(340.0, 38.0), Sense::click());
+                        let p = ui.painter();
+                        if r.hovered() {
+                            p.rect_filled(rect, 8.0, CARD_SEL);
+                        }
+                        p.text(rect.left_center() + vec2(14.0, 0.0), egui::Align2::LEFT_CENTER, g, FontId::proportional(16.0), ACCENT);
+                        p.text(rect.left_center() + vec2(42.0, 0.0), egui::Align2::LEFT_CENTER, t, FontId::proportional(13.5), TEXT);
+                        p.text(rect.right_center() - vec2(14.0, 0.0), egui::Align2::RIGHT_CENTER, k, FontId::proportional(12.0), FAINT);
+                        r.clicked()
+                    };
+                    if row(ui, ui::icon::PLUS, "新しいセッション", "⌘N") {
                         acts.push(Action::New);
                     }
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("⌘N").size(12.0).color(FAINT));
                     if !self.dormant.is_empty() {
-                        ui.add_space(18.0);
                         let n = self.dormant.len();
-                        if ui.add(egui::Button::new(RichText::new(format!("前回の {n} セッションを再開")).size(14.0)).min_size(vec2(220.0, 34.0)).corner_radius(8.0)).clicked() {
+                        if row(ui, ui::icon::ARROW_COUNTER_CLOCKWISE, &format!("前回の {n} セッションを再開"), "") {
                             acts.push(Action::ResumeAll);
                         }
                     }
+                    if row(ui, ui::icon::GEAR_SIX, "設定", "⌘,") {
+                        acts.push(Action::Settings);
+                    }
+                    ui.add_space(28.0);
+                    ui.label(RichText::new("⌘P ファイルを開く   ·   ⌘⇧F 検索   ·   ⌘L 選んだ行をエージェントに聞く").size(11.5).color(FAINT));
                 });
                 return;
             }
-            acts.extend(self.header(ui));
+            let (top_acts, tab_act) = self.top_bar(ui);
+            acts.extend(top_acts);
             let accept = !self.dialog_open();
             let sel = self.sel;
             let cwd = self.sessions[sel].cwd.clone();
             let w = self.ws.entry(cwd.clone()).or_insert_with(|| Workspace::new(cwd.clone()));
-            if let Some(t) = tab_bar(ui, w, &self.sessions[sel]) {
+            if let Some(t) = tab_act {
                 match t {
                     TabAct::Select(a) => {
                         w.active = a;
@@ -1244,11 +1320,14 @@ impl eframe::App for MureApp {
                         .height_range(100.0..=max_h)
                         .frame(Frame::new().fill(TERM_BG))
                         .show_inside(ui, |ui| {
+                            ui::hairline(ui);
                             ui.horizontal(|ui| {
-                                ui.add_space(10.0);
-                                ui.label(RichText::new(format!("エージェント · {}", self.sessions[sel].agent)).size(11.0).color(FAINT));
+                                ui.add_space(12.0);
+                                ui::status_dot(ui, &self.sessions[sel]);
+                                ui.label(RichText::new(format!("{}  ·  {}", self.sessions[sel].name, self.sessions[sel].agent)).size(11.5).color(MUTED));
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if ui.add(egui::Button::new(RichText::new("隠す ⌘J").size(11.0).color(FAINT)).frame(false)).clicked() {
+                                    ui.add_space(6.0);
+                                    if ui::icon_button(ui, ui::icon::CARET_DOWN, "隠す  ⌘J", false).clicked() {
                                         self.dock = false;
                                     }
                                 });
@@ -1306,73 +1385,19 @@ impl eframe::App for MureApp {
     }
 }
 
-fn tab_bar(ui: &mut Ui, w: &Workspace, s: &Session) -> Option<TabAct> {
-    if w.docs.is_empty() {
-        return None;
+/// タブ1つ。選ばれているものは中身と同じ色で、つながって見えるようにする
+fn tab(ui: &mut Ui, on: bool, text: &str, tint: Option<Color32>, dirty: bool) -> egui::Response {
+    let color = tint.unwrap_or(if on { TEXT } else { MUTED });
+    let mut t = RichText::new(text).size(12.5).color(color);
+    if dirty {
+        t = RichText::new(format!("{text}  ●")).size(12.5).color(color);
     }
-    let mut act = None;
-    Frame::new().fill(SIDEBAR_BG).inner_margin(Margin::symmetric(8, 4)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ScrollArea::horizontal().id_salt("tabs").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                let tab = |ui: &mut Ui, on: bool, text: RichText| {
-                    let b = egui::Button::new(text)
-                        .fill(if on { TERM_BG } else { Color32::TRANSPARENT })
-                        .stroke(Stroke::new(1.0, if on { BORDER } else { Color32::TRANSPARENT }))
-                        .corner_radius(6.0);
-                    ui.add(b)
-                };
-                let dot = if s.attention { "● " } else if s.busy { "◌ " } else { "" };
-                if tab(ui, w.active.is_none(), RichText::new(format!("{dot}エージェント")).size(12.0).color(if s.attention { WAITING } else { TEXT })).clicked() {
-                    act = Some(TabAct::Select(None));
-                }
-                for (i, d) in w.docs.iter().enumerate() {
-                    let on = w.active == Some(i);
-                    let mark = if d.dirty() { " ●" } else { "" };
-                    let r = tab(ui, on, RichText::new(format!("{}{mark}", d.title())).size(12.0).color(if on { TEXT } else { MUTED }));
-                    if r.clicked() {
-                        act = Some(TabAct::Select(Some(i)));
-                    }
-                    if r.middle_clicked() {
-                        act = Some(TabAct::Close(i));
-                    }
-                    let r = r.on_hover_text(d.path.to_string_lossy());
-                    let _ = r;
-                    if ui.add(egui::Button::new(RichText::new("×").size(12.0).color(FAINT)).frame(false)).on_hover_text("閉じる ⌘W").clicked() {
-                        act = Some(TabAct::Close(i));
-                    }
-                }
-            });
-        });
-    });
-    act
-}
-
-fn status_icon(ui: &mut Ui, s: &Session) {
-    if let Some(code) = s.exit {
-        let (t, c) = if code == 0 { ("✓", OK) } else { ("✕", BAD) };
-        ui.label(RichText::new(t).color(c).strong());
-    } else if s.attention {
-        ui.label(RichText::new("●").color(WAITING));
-    } else if s.busy {
-        ui.add(egui::Spinner::new().size(12.0).color(ACCENT));
-    } else {
-        ui.label(RichText::new("○").color(FAINT));
-    }
-}
-
-fn status_chip(ui: &mut Ui, s: &Session) {
-    let (t, c) = match s.exit {
-        Some(0) => ("終了".to_string(), OK),
-        Some(code) => (format!("終了 {code}"), BAD),
-        None if s.attention => ("待ち".into(), WAITING),
-        None if s.busy => ("実行中".into(), ACCENT),
-        None => ("静か".into(), MUTED),
-    };
-    Frame::new().fill(c.gamma_multiply(0.18)).corner_radius(10).inner_margin(Margin::symmetric(8, 2)).show(ui, |ui| {
-        ui.label(RichText::new(t).size(11.0).color(c).strong());
-    });
+    let b = egui::Button::new(t)
+        .fill(if on { TERM_BG } else { Color32::TRANSPARENT })
+        .stroke(Stroke::NONE)
+        .corner_radius(6.0)
+        .min_size(vec2(0.0, 28.0));
+    ui.add(b)
 }
 
 fn elapsed(secs: u64) -> String {

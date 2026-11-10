@@ -232,7 +232,12 @@ fn flush(
     if text.trim().is_empty() && !underline {
         return;
     }
-    painter.text(at, Align2::LEFT_TOP, text, if is_bold { bold.clone() } else { font.clone() }, fg);
+    painter.text(at, Align2::LEFT_TOP, text, font.clone(), fg);
+    if is_bold {
+        // 太さが1つしかないフォントなので、少しずらして重ねて太く見せる
+        let _ = bold;
+        painter.text(at + vec2(0.45, 0.0), Align2::LEFT_TOP, text, font.clone(), fg);
+    }
     if underline {
         let w = cw * text.chars().count() as f32;
         painter.line_segment([pos2(at.x, at.y + ch - 1.0), pos2(at.x + w, at.y + ch - 1.0)], Stroke::new(1.0, fg));

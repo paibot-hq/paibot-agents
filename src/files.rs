@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{Align, Color32, FontId, Frame, Id, Label, Layout, Margin, RichText, ScrollArea, Sense, Ui};
+use eframe::egui::{vec2, Align, Color32, FontId, Frame, Id, Label, Layout, Margin, RichText, ScrollArea, Sense, Ui};
 
 use crate::git::{DiffLine, Kind};
 use crate::theme::*;
+use crate::ui;
 
 const HIDE: &[&str] = &[".git", ".DS_Store"];
 const HEAVY: &[&str] = &["node_modules", "target", "dist", "build", ".next", ".venv", "venv", "__pycache__", ".turbo", ".cache"];
@@ -160,14 +161,20 @@ impl FilePanel {
                 ui.label(RichText::new(format!("変更 {}", self.status.len())).size(11.0).color(WAITING));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.small_button("読み直す").clicked() {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if ui::icon_button(ui, ui::icon::ARROW_CLOCKWISE, "読み直す", false).clicked() {
                     self.reload();
                 }
-                ui.checkbox(&mut self.show_hidden, RichText::new("隠しファイル").size(11.0));
+                let (g, tip) = if self.show_hidden { (ui::icon::EYE, "隠しファイルを隠す") } else { (ui::icon::EYE_SLASH, "隠しファイルも出す") };
+                if ui::icon_button(ui, g, tip, false).clicked() {
+                    self.show_hidden = !self.show_hidden;
+                }
             });
         });
         ui.add_space(4.0);
         ScrollArea::vertical().id_salt("tree").auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.spacing_mut().interact_size.y = 18.0;
             let root = self.root.clone();
             self.tree(ui, &root, 0, active, &mut acts);
         });
@@ -200,14 +207,17 @@ impl FilePanel {
             let id = Id::new(("tree", &path));
             let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
             let fill = if selected { CARD_SEL } else if hovered { CARD_HOVER } else { Color32::TRANSPARENT };
-            let inner = Frame::new().fill(fill).corner_radius(4).inner_margin(Margin::symmetric(4, 1)).show(ui, |ui| {
+            let inner = Frame::new().fill(fill).corner_radius(5).inner_margin(Margin::symmetric(6, 3)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
                     ui.add_space(depth as f32 * 14.0);
-                    let arrow = if is_dir { if open { "▾" } else { "▸" } } else { " " };
-                    ui.label(RichText::new(arrow).font(FontId::monospace(12.0)).color(FAINT));
-                    let label = if is_dir { format!("{name}/") } else { name.clone() };
-                    ui.add(Label::new(RichText::new(label).size(13.0).color(color)).truncate());
+                    let caret = if is_dir { if open { ui::icon::CARET_DOWN } else { ui::icon::CARET_RIGHT } } else { " " };
+                    ui.add_sized(vec2(10.0, 14.0), Label::new(RichText::new(caret).size(10.0).color(FAINT)));
+                    let g = if is_dir { if open { ui::icon::FOLDER_OPEN } else { ui::icon::FOLDER_SIMPLE } } else { ui::icon::FILE };
+                    let gc = if is_dir { ACCENT.gamma_multiply(0.7) } else { FAINT };
+                    ui.label(RichText::new(g).size(13.0).color(gc));
+                    ui.add(Label::new(RichText::new(&name).size(12.5).color(color)).truncate());
                     if let Some(c) = st {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(RichText::new(c.to_string()).font(FontId::monospace(11.0)).color(color));

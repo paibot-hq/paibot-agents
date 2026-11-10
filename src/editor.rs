@@ -12,6 +12,7 @@ use eframe::egui::{
 use egui_extras::syntax_highlighting::{self, CodeTheme};
 
 use crate::theme::*;
+use crate::ui;
 
 const MAX_EDIT_BYTES: u64 = 1024 * 1024;
 const MAX_VIEW_BYTES: u64 = 8 * 1024 * 1024;
@@ -172,7 +173,7 @@ pub fn show(ui: &mut Ui, doc: &mut Doc, root: &Path, font_size: f32) -> Vec<DocA
     doc.poll_disk();
     let rel = doc.path.strip_prefix(root).unwrap_or(&doc.path).to_string_lossy().into_owned();
 
-    Frame::new().fill(HEADER_BG).inner_margin(Margin::symmetric(12, 6)).show(ui, |ui| {
+    Frame::new().fill(TERM_BG).inner_margin(Margin { left: 14, right: 8, top: 5, bottom: 5 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             ui.add(Label::new(RichText::new(&rel).size(12.0).color(MUTED)).truncate());
@@ -183,19 +184,26 @@ pub fn show(ui: &mut Ui, doc: &mut Doc, root: &Path, font_size: f32) -> Vec<DocA
                 ui.label(RichText::new(r).size(11.0).color(FAINT));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.small_button("エディタ").clicked() {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if ui::icon_button(ui, ui::icon::CODE, "エディタで開く", false).clicked() {
                     acts.push(DocAction::OpenInEditor);
                 }
                 let ask = match doc.selection {
-                    Some((a, b)) if a != b => format!("{a}〜{b}行目を聞く"),
-                    Some((a, _)) => format!("{a}行目を聞く"),
+                    Some((a, b)) if a != b => format!("{a}〜{b} 行目を聞く"),
+                    Some((a, _)) => format!("{a} 行目を聞く"),
                     None => "このファイルについて聞く".into(),
                 };
-                if ui.small_button(ask).on_hover_text("⌘L  エージェントの入力欄に入れる").clicked() {
+                let b = egui::Button::new(RichText::new(format!("{}  {ask}", ui::icon::SPARKLE)).size(12.0).color(ACCENT))
+                    .fill(ACCENT.gamma_multiply(0.12))
+                    .corner_radius(6.0);
+                if ui.add(b).on_hover_text("⌘L  エージェントの入力欄に入れる").clicked() {
                     acts.push(DocAction::Ask);
                 }
-                if doc.readonly.is_none() && ui.add_enabled(doc.dirty(), egui::Button::new("保存").small()).on_hover_text("⌘S").clicked() {
-                    acts.push(DocAction::Save);
+                if doc.readonly.is_none() && doc.dirty() {
+                    let b = egui::Button::new(RichText::new(format!("{}  保存", ui::icon::FLOPPY_DISK)).size(12.0)).corner_radius(6.0);
+                    if ui.add(b).on_hover_text("⌘S").clicked() {
+                        acts.push(DocAction::Save);
+                    }
                 }
             });
         });

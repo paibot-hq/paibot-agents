@@ -91,7 +91,7 @@ impl Picker {
         let modal = egui::Modal::new(Id::new("picker")).show(ctx, |ui| {
             ui.set_width(680.0_f32.min(screen.width() - 80.0));
             ui.horizontal(|ui| {
-                ui.label(RichText::new("新しいセッション").size(18.0).strong().color(TEXT));
+                ui.label(RichText::new("新しいセッション").font(crate::ui::bold(17.0)).color(TEXT));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(RichText::new("↑↓ 選ぶ · Tab エージェント · Enter 始める · Esc やめる").size(11.0).color(FAINT));
                 });
@@ -119,7 +119,7 @@ impl Picker {
             // 絞り込み
             let r = ui.add(
                 TextEdit::singleline(&mut self.query)
-                    .hint_text("プロジェクトを絞り込む")
+                    .hint_text(format!("{}  プロジェクトを絞り込む", crate::ui::icon::MAGNIFYING_GLASS))
                     .desired_width(f32::INFINITY)
                     .font(egui::FontId::proportional(15.0))
                     .margin(Margin::symmetric(10, 8)),
@@ -138,6 +138,8 @@ impl Picker {
             let hi = self.hi.min(list.len().saturating_sub(1));
             let height = (screen.height() * 0.45).clamp(160.0, 420.0);
             ScrollArea::vertical().max_height(height).min_scrolled_height(height).auto_shrink([false, false]).show(ui, |ui| {
+                ui.spacing_mut().interact_size.y = 20.0;
+                ui.spacing_mut().item_spacing.y = 2.0;
                 if list.is_empty() {
                     ui.add_space(20.0);
                     ui.vertical_centered(|ui| {
@@ -162,12 +164,14 @@ impl Picker {
                     let id = Id::new(("proj", &p.path));
                     let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
                     let fill = if on { CARD_SEL } else if hovered { CARD_HOVER } else { egui::Color32::TRANSPARENT };
-                    let inner = Frame::new().fill(fill).corner_radius(6).inner_margin(Margin::symmetric(10, 6)).show(ui, |ui| {
+                    let inner = Frame::new().fill(fill).corner_radius(7).inner_margin(Margin::symmetric(10, 7)).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(&p.name).size(14.0).strong().color(TEXT));
+                            let g = if p.group.starts_with("VSCode") { crate::ui::icon::CODE } else { crate::ui::icon::FOLDER_SIMPLE };
+                            ui.label(RichText::new(g).size(14.0).color(if on { ACCENT } else { FAINT }));
+                            ui.label(RichText::new(&p.name).size(13.5).color(TEXT));
                             if p.git {
-                                ui.label(RichText::new("git").size(10.0).color(FAINT));
+                                ui.label(RichText::new(crate::ui::icon::GIT_BRANCH).size(11.0).color(FAINT));
                             }
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.add(Label::new(RichText::new(&p.path).size(11.0).color(FAINT)).truncate());
@@ -207,9 +211,10 @@ impl Picker {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 let can = chosen.is_some();
-                let start = egui::Button::new(RichText::new("始める").strong().size(14.0))
+                let start = egui::Button::new(RichText::new(format!("{}  始める", crate::ui::icon::PLAY)).size(13.5).color(egui::Color32::WHITE))
                     .min_size(vec2(110.0, 32.0))
-                    .fill(ACCENT.gamma_multiply(0.35));
+                    .corner_radius(7.0)
+                    .fill(ACCENT.gamma_multiply(0.55));
                 if ui.add_enabled(can, start).clicked() {
                     start_dir = chosen.as_ref().map(|c| c.0.clone());
                 }

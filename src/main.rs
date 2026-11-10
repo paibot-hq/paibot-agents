@@ -15,6 +15,7 @@ mod setup;
 mod shot;
 mod term;
 mod theme;
+mod ui;
 mod util;
 mod vscode;
 
@@ -83,6 +84,10 @@ fn main() -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("mure")
+            // タイトルバーを消して、中身を一番上まで広げる（信号機ボタンだけ残る）
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false)
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([720.0, 420.0]),
         ..Default::default()
@@ -115,59 +120,112 @@ fn load(fonts: &mut FontDefinitions, name: &str, path: &str, index: u32, tweak: 
 
 fn setup(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
-    let mut mono = Vec::new();
-    let mut mono_bold = Vec::new();
-    let mut ui_fonts = Vec::new();
-    if load(&mut fonts, "menlo", "/System/Library/Fonts/Menlo.ttc", 0, None) {
-        mono.push("menlo".to_string());
-    }
-    if load(&mut fonts, "menlo-bold", "/System/Library/Fonts/Menlo.ttc", 1, None) {
-        mono_bold.push("menlo-bold".to_string());
-    }
-    // ターミナルの中では、日本語を英数字の高さに合わせ、2桁分の幅に少し近づける
-    let cjk = egui::FontTweak { scale: 1.1, y_offset_factor: 0.2, ..Default::default() };
+    let defaults_prop = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    let defaults_mono = fonts.families.get(&FontFamily::Monospace).cloned().unwrap_or_default();
+
     const W3: &str = "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc";
     const W6: &str = "/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc";
-    if load(&mut fonts, "hira", W3, 0, None) {
-        ui_fonts.push("hira".to_string());
+    // 画面の文字: 英数字は SF、日本語はヒラギノ（高さを SF にそろえる）
+    let jp_ui = egui::FontTweak { y_offset_factor: 0.24, ..Default::default() };
+    // ターミナル: SF Mono、日本語は2桁分の幅に近づけて高さもそろえる
+    let jp_mono = egui::FontTweak { scale: 1.08, y_offset_factor: 0.16, ..Default::default() };
+
+    let mut ui_fonts: Vec<String> = Vec::new();
+    let mut ui_bold: Vec<String> = Vec::new();
+    let mut mono: Vec<String> = Vec::new();
+    for (name, path, idx, tweak, list) in [
+        ("sf", "/System/Library/Fonts/SFNS.ttf", 0, None, 0),
+        ("hira", W3, 0, Some(jp_ui), 0),
+        ("hira-bold", W6, 0, Some(jp_ui), 1),
+        ("sf-mono", "/System/Library/Fonts/SFNSMono.ttf", 0, None, 2),
+        ("menlo", "/System/Library/Fonts/Menlo.ttc", 0, None, 2),
+        ("hira-mono", W3, 0, Some(jp_mono), 2),
+    ] {
+        if load(&mut fonts, name, path, idx, tweak) {
+            match list {
+                0 => ui_fonts.push(name.into()),
+                1 => ui_bold.push(name.into()),
+                _ => mono.push(name.into()),
+            }
+        }
     }
-    if load(&mut fonts, "hira-mono", W3, 0, Some(cjk)) {
-        mono.push("hira-mono".into());
+    // 記号の予備（SF Mono にない ✻ ⏺ などのため Menlo と Apple Symbols を後ろに置く）
+    if load(&mut fonts, "symbols", "/System/Library/Fonts/Apple Symbols.ttf", 0, None) {
+        mono.push("symbols".into());
+        ui_fonts.push("symbols".into());
     }
-    if load(&mut fonts, "hira-mono-bold", W6, 0, Some(cjk)) {
-        mono_bold.push("hira-mono-bold".into());
-    }
-    let defaults_mono = fonts.families.get(&FontFamily::Monospace).cloned().unwrap_or_default();
-    let defaults_prop = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    fonts.font_data.insert("phosphor".into(), Arc::new(egui_phosphor::Variant::Regular.font_data()));
+
+    let mut p = ui_fonts.clone();
+    p.push("phosphor".into());
+    p.extend(defaults_prop.clone());
+    fonts.families.insert(FontFamily::Proportional, p);
+
+    // 太字: 英数字は SF（可変フォントの既定の太さ）、日本語はヒラギノ W6
+    let mut b = vec!["sf".to_string()];
+    b.extend(ui_bold);
+    b.extend(ui_fonts);
+    b.push("phosphor".into());
+    b.extend(defaults_prop);
+    fonts.families.insert(FontFamily::Name("ui-bold".into()), b);
 
     let mut m = mono.clone();
+    m.push("phosphor".into());
     m.extend(defaults_mono.clone());
-    fonts.families.insert(FontFamily::Monospace, m);
-
-    let mut b = mono_bold;
-    b.extend(mono);
-    b.extend(defaults_mono);
-    fonts.families.insert(FontFamily::Name("bold".into()), b);
-
-    // 画面の文字はヒラギノを先に（日本語が読みやすい）
-    let mut p = ui_fonts;
-    p.extend(defaults_prop);
-    fonts.families.insert(FontFamily::Proportional, p);
+    fonts.families.insert(FontFamily::Monospace, m.clone());
+    fonts.families.insert(FontFamily::Name("bold".into()), m);
     ctx.set_fonts(fonts);
 
     let mut v = egui::Visuals::dark();
     v.panel_fill = theme::SIDEBAR_BG;
-    v.window_fill = theme::CARD;
+    v.window_fill = theme::RAISED;
     v.window_stroke = egui::Stroke::new(1.0, theme::BORDER);
-    v.override_text_color = Some(theme::TEXT);
-    v.selection.bg_fill = theme::ACCENT.gamma_multiply(0.35);
-    v.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
-    v.widgets.hovered.corner_radius = egui::CornerRadius::same(6);
-    v.widgets.active.corner_radius = egui::CornerRadius::same(6);
+    v.window_corner_radius = egui::CornerRadius::same(12);
+    v.menu_corner_radius = egui::CornerRadius::same(8);
+    v.window_shadow = egui::Shadow { offset: [0, 12], blur: 32, spread: 0, color: egui::Color32::from_black_alpha(140) };
+    v.popup_shadow = egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: egui::Color32::from_black_alpha(120) };
+    v.extreme_bg_color = theme::INPUT_BG;
+    v.faint_bg_color = theme::HEADER_BG;
+    v.override_text_color = None;
+    v.hyperlink_color = theme::ACCENT;
+    v.selection.bg_fill = theme::ACCENT.gamma_multiply(0.30);
+    v.selection.stroke = egui::Stroke::new(1.0, theme::ACCENT);
+    v.text_cursor.stroke = egui::Stroke::new(2.0, theme::ACCENT);
+    let w = &mut v.widgets;
+    w.noninteractive.bg_stroke = egui::Stroke::new(1.0, theme::HAIRLINE);
+    w.noninteractive.fg_stroke = egui::Stroke::new(1.0, theme::TEXT);
+    for (st, fill, fg) in [
+        (&mut w.inactive, theme::CARD_SEL, theme::TEXT),
+        (&mut w.hovered, egui::Color32::from_rgb(0x2b, 0x2f, 0x3a), theme::TEXT),
+        (&mut w.active, egui::Color32::from_rgb(0x33, 0x38, 0x46), theme::TEXT),
+        (&mut w.open, theme::CARD_SEL, theme::TEXT),
+    ] {
+        st.weak_bg_fill = fill;
+        st.bg_fill = fill;
+        st.bg_stroke = egui::Stroke::NONE;
+        st.fg_stroke = egui::Stroke::new(1.0, fg);
+        st.corner_radius = egui::CornerRadius::same(6);
+        st.expansion = 0.0;
+    }
+    w.inactive.fg_stroke = egui::Stroke::new(1.0, theme::TEXT.gamma_multiply(0.92));
+    w.hovered.bg_stroke = egui::Stroke::NONE;
     ctx.set_visuals(v);
     ctx.style_mut(|s| {
+        use egui::{FontId, TextStyle};
+        s.text_styles = [
+            (TextStyle::Heading, FontId::new(18.0, FontFamily::Name("ui-bold".into()))),
+            (TextStyle::Body, FontId::proportional(13.0)),
+            (TextStyle::Button, FontId::proportional(13.0)),
+            (TextStyle::Small, FontId::proportional(11.0)),
+            (TextStyle::Monospace, FontId::monospace(12.5)),
+        ]
+        .into();
         s.spacing.item_spacing = egui::vec2(8.0, 6.0);
         s.spacing.button_padding = egui::vec2(10.0, 5.0);
+        s.spacing.interact_size.y = 26.0;
+        s.spacing.menu_margin = egui::Margin::same(6);
+        s.spacing.window_margin = egui::Margin::same(18);
+        s.spacing.scroll = egui::style::ScrollStyle::floating();
         s.interaction.selectable_labels = false;
     });
 }

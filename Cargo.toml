@@ -16,6 +16,7 @@ toml = "0.8"
 serde_json = "1"
 rfd = "0.15"
 png = "0.17"
+egui-phosphor = "0.10"
 egui_extras = { version = "0.32", default-features = false, features = ["syntect"] }
 
 [profile.release]
