@@ -45,7 +45,8 @@ fn in_sel(sel: Option<(Cell, Cell)>, p: Cell) -> bool {
 }
 
 /// ターミナルを描いて入力を送る。大きさが変わったら新しい (行, 桁) を返す
-pub fn show(ui: &mut Ui, s: &mut Session, st: &mut TermState, accept_input: bool) -> Option<(u16, u16)> {
+/// accept_input: キーを受け付ける / auto_focus: ほかに何も選ばれていなければ自分が取る / grab: 必ず取る
+pub fn show(ui: &mut Ui, s: &mut Session, st: &mut TermState, accept_input: bool, auto_focus: bool, grab: bool) -> Option<(u16, u16)> {
     let font = FontId::monospace(st.font_size);
     let bold = FontId::new(st.font_size, FontFamily::Name("bold".into()));
     let (cw, ch) = ui.fonts(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
@@ -61,7 +62,7 @@ pub fn show(ui: &mut Ui, s: &mut Session, st: &mut TermState, accept_input: bool
     if resp.clicked() || resp.drag_started() {
         resp.request_focus();
     }
-    if accept_input && ui.memory(|m| m.focused().is_none()) {
+    if accept_input && (grab || (auto_focus && ui.memory(|m| m.focused().is_none()))) {
         ui.memory_mut(|m| m.request_focus(id));
     }
     let focused = ui.memory(|m| m.has_focus(id));

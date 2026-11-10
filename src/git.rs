@@ -106,6 +106,19 @@ pub enum Kind {
 pub struct DiffLine {
     pub kind: Kind,
     pub text: String,
+    /// このまとまりのファイル（リポジトリからの場所）
+    pub file: String,
+    /// まとまりの見出し（@@）なら、変更後の行の範囲
+    pub range: Option<(usize, usize)>,
+}
+
+/// "@@ -1,5 +12,7 @@" → (12, 18)
+fn hunk_range(l: &str) -> Option<(usize, usize)> {
+    let plus = l.split_whitespace().find(|w| w.starts_with('+'))?;
+    let mut it = plus[1..].split(',');
+    let start: usize = it.next()?.parse().ok()?;
+    let len: usize = it.next().map(|n| n.parse().unwrap_or(1)).unwrap_or(1);
+    Some((start.max(1), (start + len.max(1) - 1).max(1)))
 }
 
 pub struct Diff {
@@ -130,7 +143,13 @@ pub fn diff(dir: &Path) -> Diff {
 
 fn parse(text: &str) -> Vec<DiffLine> {
     let mut lines = Vec::new();
+    let mut file = String::new();
     for l in text.lines().take(MAX_LINES) {
+        if let Some(f) = l.strip_prefix("+++ b/") {
+            file = f.to_string();
+        } else if l.starts_with("diff --git") {
+            file = l.split(" b/").last().unwrap_or("").to_string();
+        }
         let kind = if l.starts_with("diff --git") {
             Kind::File
         } else if l.starts_with("+++")
@@ -152,21 +171,17 @@ fn parse(text: &str) -> Vec<DiffLine> {
             Kind::Plain
         };
         let text = if kind == Kind::File { l.split(" b/").last().unwrap_or(l).to_string() } else { l.replace('\t', "    ") };
-        lines.push(DiffLine { kind, text });
+        let range = if kind == Kind::Hunk { hunk_range(l) } else { None };
+        lines.push(DiffLine { kind, text, file: file.clone(), range });
     }
     lines
 }
 
-/// 1ファイル分の差分。まだgitが知らないファイルは全部を追加として出す
-pub fn diff_file(dir: &Path, file: &Path) -> Vec<DiffLine> {
-    let f = file.to_string_lossy().into_owned();
-    let mut args = diff_base(dir);
-    args.extend(["--", &f]);
-    let text = git(dir, &args).unwrap_or_default();
-    if !text.trim().is_empty() {
-        return parse(&text);
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn hunk_range() {
+        assert_eq!(super::hunk_range("@@ -1,5 +12,7 @@ fn x()"), Some((12, 18)));
+        assert_eq!(super::hunk_range("@@ -0,0 +1 @@"), Some((1, 1)));
     }
-    // 追跡していないファイル（--no-index は差分があると終了コード1なので直接呼ぶ）
-    let out = Command::new("git").arg("-C").arg(dir).args(["diff", "--no-color", "--no-index", "--", "/dev/null", &f]).output();
-    out.map(|o| parse(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default()
 }

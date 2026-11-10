@@ -1,11 +1,14 @@
 mod app;
 mod config;
+mod editor;
 mod files;
 mod git;
 mod keys;
 mod notify;
 mod picker;
 mod projects;
+mod quickopen;
+mod search;
 mod session;
 mod setup;
 mod shot;

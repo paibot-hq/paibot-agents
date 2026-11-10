@@ -11,6 +11,9 @@ use eframe::egui::{
 };
 
 use crate::config::{self, Config};
+use crate::editor::{self, Doc, DocAction};
+use crate::quickopen::{self, QuickOpen};
+use crate::search::Search;
 use crate::files::{self, FileAction, FilePanel};
 use crate::git;
 use crate::notify;
@@ -26,11 +29,83 @@ pub use crate::util::tilde;
 enum Side {
     Files,
     Diff,
+    Search,
 }
 
 enum Confirm {
     Kill(usize),
     Quit,
+    /// 保存していないファイルを閉じる（セッションのフォルダ, タブ）
+    CloseDoc(PathBuf, usize),
+}
+
+/// セッションのフォルダごとの、ツリー・開いているファイル・検索
+struct Workspace {
+    tree: FilePanel,
+    docs: Vec<Doc>,
+    /// None ならエージェントのタブ
+    active: Option<usize>,
+    search: Search,
+}
+
+impl Workspace {
+    fn new(cwd: PathBuf) -> Self {
+        Self { tree: FilePanel::new(cwd), docs: Vec::new(), active: None, search: Search::default() }
+    }
+
+    fn open(&mut self, path: PathBuf, line: Option<usize>) {
+        let i = match self.docs.iter().position(|d| d.path == path) {
+            Some(i) => i,
+            None => {
+                self.docs.push(Doc::open(path.clone()));
+                self.docs.len() - 1
+            }
+        };
+        self.docs[i].goto = line.or(self.docs[i].goto);
+        self.active = Some(i);
+        self.tree.reveal(&path);
+        self.tree.scroll_to_active = true;
+    }
+
+    fn close(&mut self, i: usize) {
+        if i < self.docs.len() {
+            self.docs.remove(i);
+        }
+        self.active = match self.active {
+            Some(a) if a == i => if self.docs.is_empty() { None } else { Some(i.min(self.docs.len() - 1)) },
+            Some(a) if a > i => Some(a - 1),
+            other => other,
+        };
+    }
+
+    fn dirty(&self) -> usize {
+        self.docs.iter().filter(|d| d.dirty()).count()
+    }
+}
+
+/// エージェントに聞く（入力欄に入れる文を作る）
+struct Ask {
+    rel: String,
+    lines: Option<(usize, usize)>,
+    comment: String,
+    first: bool,
+}
+
+impl Ask {
+    fn text(&self) -> String {
+        let place = match self.lines {
+            Some((a, b)) if a != b => format!("{} の {a}〜{b} 行目", self.rel),
+            Some((a, _)) => format!("{} の {a} 行目", self.rel),
+            None => self.rel.clone(),
+        };
+        let c = self.comment.trim();
+        if c.is_empty() { format!("{place}: ") } else { format!("{place}: {c}") }
+    }
+}
+
+enum TabAct {
+    Select(Option<usize>),
+    Close(usize),
 }
 
 struct DiffPanel {
@@ -47,6 +122,8 @@ enum Action {
     Remove(usize),
     Diff(usize),
     Files(usize),
+    Search(usize),
+    Open(PathBuf, Option<usize>),
     Editor(usize),
     Finder(usize),
     Settings,
@@ -63,7 +140,12 @@ pub struct MureApp {
     confirm: Option<Confirm>,
     side: Option<Side>,
     diff: Option<DiffPanel>,
-    files: HashMap<PathBuf, FilePanel>,
+    ws: HashMap<PathBuf, Workspace>,
+    quick: Option<QuickOpen>,
+    ask: Option<Ask>,
+    /// ファイルを開いているとき、エージェントを下に出す
+    dock: bool,
+    grab_term: bool,
     launch_dir: PathBuf,
     egui_ctx: egui::Context,
     flash: Option<(String, Instant)>,
@@ -98,7 +180,11 @@ impl MureApp {
             confirm: None,
             side: None,
             diff: None,
-            files: HashMap::new(),
+            ws: HashMap::new(),
+            quick: None,
+            ask: None,
+            dock: true,
+            grab_term: false,
             launch_dir: dir.clone(),
             egui_ctx: cc.egui_ctx.clone(),
             flash: cfg_err.map(|e| (e, Instant::now())),
@@ -128,12 +214,29 @@ impl MureApp {
         match shot_ui.as_str() {
             "new" => app.open_new(),
             "diff" if !app.sessions.is_empty() => app.apply(Action::Diff(0)),
-            "files" if !app.sessions.is_empty() => {
+            "files" | "ask" | "quick" | "search" if !app.sessions.is_empty() => {
                 app.apply(Action::Files(0));
                 if let Ok(f) = std::env::var("MURE_SHOT_OPEN") {
+                    let p = app.sessions[0].cwd.join(f);
+                    app.apply(Action::Open(p, Some(30)));
+                }
+                if shot_ui == "ask" {
+                    if let Some(w) = app.cur_ws() {
+                        if let Some(d) = w.active.map(|i| &w.docs[i]) {
+                            let rel = d.path.strip_prefix(&w.tree.root).unwrap_or(&d.path).to_string_lossy().into_owned();
+                            app.ask = Some(Ask { rel, lines: Some((30, 42)), comment: "ここ、もっと短く書ける？".into(), first: true });
+                        }
+                    }
+                }
+                if shot_ui == "quick" {
+                    app.quick = Some(QuickOpen::new(app.sessions[0].cwd.clone()));
+                }
+                if shot_ui == "search" {
+                    app.side = Some(Side::Search);
+                    let q = std::env::var("MURE_SHOT_QUERY").unwrap_or_else(|_| "fn ".into());
                     let cwd = app.sessions[0].cwd.clone();
-                    if let Some(p) = app.files.get_mut(&cwd) {
-                        p.open_path(&cwd.join(f));
+                    if let Some(w) = app.cur_ws() {
+                        w.search.set_and_run(&q, &cwd);
                     }
                 }
             }
@@ -150,8 +253,43 @@ impl MureApp {
         self.sessions.iter().filter(|s| s.exit.is_none()).count()
     }
 
+    /// 今のセッションのワークスペース（なければ作る）
+    fn cur_ws(&mut self) -> Option<&mut Workspace> {
+        let cwd = self.sessions.get(self.sel)?.cwd.clone();
+        Some(self.ws.entry(cwd.clone()).or_insert_with(|| Workspace::new(cwd)))
+    }
+
+    fn dirty_docs(&self) -> usize {
+        self.ws.values().map(|w| w.dirty()).sum()
+    }
+
+    /// 今開いているファイルについて聞く
+    fn ask_active(&mut self) {
+        let Some(w) = self.cur_ws() else { return };
+        let Some(i) = w.active else { return };
+        let d = &w.docs[i];
+        let rel = d.path.strip_prefix(&w.tree.root).unwrap_or(&d.path).to_string_lossy().into_owned();
+        let lines = d.selection;
+        self.ask = Some(Ask { rel, lines, comment: String::new(), first: true });
+    }
+
+    fn save_active(&mut self) {
+        let Some(w) = self.cur_ws() else { return };
+        let Some(i) = w.active else { return };
+        let r = w.docs[i].save();
+        match r {
+            Ok(()) => {}
+            Err(e) => self.flash(format!("保存できませんでした: {e}")),
+        }
+    }
+
     fn dialog_open(&self) -> bool {
-        self.picker.is_some() || self.setup.is_some() || self.rename.is_some() || self.confirm.is_some()
+        self.picker.is_some()
+            || self.setup.is_some()
+            || self.rename.is_some()
+            || self.confirm.is_some()
+            || self.quick.is_some()
+            || self.ask.is_some()
     }
 
     fn select(&mut self, i: usize) {
@@ -246,9 +384,22 @@ impl MureApp {
                 if self.side == Some(Side::Files) {
                     self.side = None;
                 } else {
-                    let cwd = self.sessions[i].cwd.clone();
-                    self.files.entry(cwd.clone()).or_insert_with(|| FilePanel::new(cwd));
+                    self.cur_ws();
                     self.side = Some(Side::Files);
+                }
+            }
+            Action::Search(i) => {
+                self.select(i);
+                if self.side == Some(Side::Search) {
+                    self.side = None;
+                } else if let Some(w) = self.cur_ws() {
+                    w.search.focus = true;
+                    self.side = Some(Side::Search);
+                }
+            }
+            Action::Open(p, line) => {
+                if let Some(w) = self.cur_ws() {
+                    w.open(p, line);
                 }
             }
             Action::Editor(i) => {
@@ -308,7 +459,39 @@ impl MureApp {
             return;
         }
         let cmd = Modifiers::COMMAND;
+        let shift_cmd = Modifiers::COMMAND | Modifiers::SHIFT;
+        let alt_cmd = Modifiers::COMMAND | Modifiers::ALT;
+        let has = !self.sessions.is_empty();
+        if ctx.input_mut(|i| i.consume_key(shift_cmd, Key::F)) && has {
+            if let Some(w) = self.cur_ws() {
+                w.search.focus = true;
+            }
+            self.side = Some(Side::Search);
+        }
+        // ⌘⌥← → でタブを移る
+        let left = ctx.input_mut(|i| i.consume_key(alt_cmd, Key::ArrowLeft));
+        let right = ctx.input_mut(|i| i.consume_key(alt_cmd, Key::ArrowRight));
+        if (left || right) && has {
+            if let Some(w) = self.cur_ws() {
+                let n = w.docs.len() + 1;
+                let cur = w.active.map(|a| a + 1).unwrap_or(0);
+                let next = if right { (cur + 1) % n } else { (cur + n - 1) % n };
+                w.active = if next == 0 { None } else { Some(next - 1) };
+            }
+        }
         let take = |k: Key| ctx.input_mut(|i| i.consume_key(cmd, k));
+        if take(Key::S) && has {
+            self.save_active();
+        }
+        if take(Key::P) && has {
+            self.quick = Some(QuickOpen::new(self.sessions[self.sel].cwd.clone()));
+        }
+        if take(Key::L) && has {
+            self.ask_active();
+        }
+        if take(Key::J) {
+            self.dock = !self.dock;
+        }
         if take(Key::N) {
             self.open_new();
         }
@@ -321,9 +504,22 @@ impl MureApp {
         if take(Key::Comma) {
             self.apply(Action::Settings);
         }
-        if take(Key::W) && !self.sessions.is_empty() {
-            let i = self.sel;
-            self.apply(if self.sessions[i].exit.is_some() { Action::Remove(i) } else { Action::Kill(i) });
+        if take(Key::W) && has {
+            // ファイルのタブならそれを閉じる。エージェントのタブならセッションを止める
+            let cwd = self.sessions[self.sel].cwd.clone();
+            let doc = self.cur_ws().and_then(|w| w.active.map(|a| (a, w.docs[a].dirty())));
+            match doc {
+                Some((a, true)) => self.confirm = Some(Confirm::CloseDoc(cwd, a)),
+                Some((a, false)) => {
+                    if let Some(w) = self.cur_ws() {
+                        w.close(a);
+                    }
+                }
+                None => {
+                    let i = self.sel;
+                    self.apply(if self.sessions[i].exit.is_some() { Action::Remove(i) } else { Action::Kill(i) });
+                }
+            }
         }
         if take(Key::OpenBracket) {
             self.select(self.sel.saturating_sub(1));
@@ -500,6 +696,9 @@ impl MureApp {
                 if ui.selectable_label(self.side == Some(Side::Diff), "差分").on_hover_text("⌘D").clicked() {
                     acts.push(Action::Diff(i));
                 }
+                if ui.selectable_label(self.side == Some(Side::Search), "検索").on_hover_text("⌘⇧F").clicked() {
+                    acts.push(Action::Search(i));
+                }
                 if ui.selectable_label(self.side == Some(Side::Files), "ファイル").on_hover_text("⌘E").clicked() {
                     acts.push(Action::Files(i));
                 }
@@ -519,6 +718,7 @@ impl MureApp {
 
     fn diff_panel(&mut self, ui: &mut Ui) {
         let Some(d) = &mut self.diff else { return };
+        let mut ask = None;
         let mut close = false;
         let mut reload = false;
         ui.add_space(6.0);
@@ -553,7 +753,12 @@ impl MureApp {
             }
             ui.add_space(6.0);
             ui.separator();
-            files::diff_view(ui, &d.diff.lines, "diff-all");
+            if let Some(h) = files::diff_view(ui, &d.diff.lines, "diff-all") {
+                ask = Some(Ask { rel: h.file, lines: Some(h.range), comment: String::new(), first: true });
+            }
+        }
+        if ask.is_some() {
+            self.ask = ask;
         }
         if close {
             self.side = None;
@@ -595,6 +800,80 @@ impl MureApp {
             }
         }
 
+        if let Some(mut q) = self.quick.take() {
+            match q.show(ctx) {
+                quickopen::Outcome::Keep => self.quick = Some(q),
+                quickopen::Outcome::Cancel => {}
+                quickopen::Outcome::Open(p) => self.apply(Action::Open(p, None)),
+            }
+        }
+
+        if let Some(mut a) = self.ask.take() {
+            let mut keep = true;
+            let mut send: Option<bool> = None;
+            let modal = egui::Modal::new(Id::new("ask")).show(ctx, |ui| {
+                ui.set_width(520.0);
+                ui.label(RichText::new("エージェントに聞く").size(16.0).strong());
+                ui.add_space(4.0);
+                ui.label(RichText::new(a.text()).font(FontId::monospace(12.0)).color(MUTED));
+                ui.add_space(8.0);
+                let r = ui.add(
+                    TextEdit::multiline(&mut a.comment)
+                        .hint_text("聞きたいこと・直してほしいこと")
+                        .desired_rows(3)
+                        .desired_width(f32::INFINITY),
+                );
+                if a.first {
+                    r.request_focus();
+                    a.first = false;
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(RichText::new("送る").strong()).fill(ACCENT.gamma_multiply(0.35))).on_hover_text("⌘Enter").clicked() {
+                        send = Some(true);
+                    }
+                    if ui.button("入力欄に入れるだけ").on_hover_text("Enter").clicked() {
+                        send = Some(false);
+                    }
+                    if ui.button("やめる").clicked() {
+                        keep = false;
+                    }
+                });
+            });
+            // Enter は入力欄に入れるだけ、⌘Enter で送る（Shift+Enter は改行）
+            let (cmd_enter, enter) = ctx.input_mut(|i| {
+                (i.consume_key(Modifiers::COMMAND, Key::Enter), i.consume_key(Modifiers::NONE, Key::Enter))
+            });
+            if cmd_enter {
+                send = Some(true);
+            } else if enter {
+                send = Some(false);
+            }
+            if modal.should_close() {
+                keep = false;
+            }
+            if let Some(submit) = send {
+                let text = a.text();
+                if let Some(s) = self.sessions.get_mut(self.sel) {
+                    s.paste(&text);
+                    if submit {
+                        s.write(b"\r");
+                    }
+                }
+                let dock = self.dock;
+                if let Some(w) = self.cur_ws() {
+                    if !dock {
+                        w.active = None;
+                    }
+                }
+                self.grab_term = true;
+                keep = false;
+            }
+            if keep {
+                self.ask = Some(a);
+            }
+        }
+
         if let Some((i, mut name)) = self.rename.take() {
             let mut keep = true;
             let modal = egui::Modal::new(Id::new("rename")).show(ctx, |ui| {
@@ -627,7 +906,18 @@ impl MureApp {
                     "止める".to_string(),
                     format!("「{}」を止めます。worktree やファイルはそのまま残ります。", self.sessions.get(*i).map(|s| s.name.as_str()).unwrap_or("")),
                 ),
-                Confirm::Quit => ("終わる".to_string(), format!("動いているセッションが {} 個あります。全部止めて終わりますか？", self.alive())),
+                Confirm::Quit => {
+                    let dirty = self.dirty_docs();
+                    let extra = if dirty > 0 { format!("保存していないファイルが {dirty} 個あります（保存されません）。") } else { String::new() };
+                    ("終わる".to_string(), format!("動いているセッションが {} 個あります。{extra}全部止めて終わりますか？", self.alive()))
+                }
+                Confirm::CloseDoc(cwd, i) => (
+                    "閉じる".to_string(),
+                    format!(
+                        "「{}」に保存していない変更があります。捨てて閉じますか？",
+                        self.ws.get(cwd).and_then(|w| w.docs.get(*i)).map(|d| d.title()).unwrap_or_default()
+                    ),
+                ),
             };
             let modal = egui::Modal::new(Id::new("confirm")).show(ctx, |ui| {
                 ui.set_width(380.0);
@@ -653,6 +943,11 @@ impl MureApp {
             if yes {
                 match c {
                     Confirm::Kill(i) => self.remove(i),
+                    Confirm::CloseDoc(cwd, i) => {
+                        if let Some(w) = self.ws.get_mut(&cwd) {
+                            w.close(i);
+                        }
+                    }
                     Confirm::Quit => {
                         self.allow_close = true;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -676,7 +971,7 @@ impl eframe::App for MureApp {
             }
         }
 
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && self.alive() > 0 {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && (self.alive() > 0 || self.dirty_docs() > 0) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.confirm = Some(Confirm::Quit);
         }
@@ -700,27 +995,32 @@ impl eframe::App for MureApp {
                 .frame(Frame::new().fill(SIDEBAR_BG).inner_margin(Margin::same(12)))
                 .show(ctx, |ui| match side {
                     Side::Diff => self.diff_panel(ui),
-                    Side::Files => {
+                    Side::Files | Side::Search => {
                         let cwd = self.sessions[self.sel].cwd.clone();
                         let mut close = false;
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("ファイル").size(15.0).strong().color(TEXT));
+                            let title = if side == Side::Files { "ファイル" } else { "検索" };
+                            ui.label(RichText::new(title).size(15.0).strong().color(TEXT));
+                            if side == Side::Files {
+                                ui.label(RichText::new("⌘P で名前から開く").size(11.0).color(FAINT));
+                            }
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.button("閉じる").on_hover_text("⌘E").clicked() {
+                                if ui.button("閉じる").clicked() {
                                     close = true;
                                 }
                             });
                         });
                         ui.add_space(6.0);
-                        let panel = self.files.entry(cwd.clone()).or_insert_with(|| FilePanel::new(cwd));
-                        for a in panel.show(ui) {
-                            match a {
-                                FileAction::OpenInEditor(p) => {
-                                    if !open_in(&self.cfg.editor_app, &p) {
-                                        self.flash = Some((format!("{} で開けませんでした", self.cfg.editor_app), Instant::now()));
-                                    }
+                        let w = self.ws.entry(cwd.clone()).or_insert_with(|| Workspace::new(cwd.clone()));
+                        if side == Side::Files {
+                            let active = w.active.map(|i| w.docs[i].path.clone());
+                            for a in w.tree.show(ui, active.as_deref()) {
+                                match a {
+                                    FileAction::Open(p) => w.open(p, None),
                                 }
                             }
+                        } else if let Some((p, line)) = w.search.show(ui, &cwd) {
+                            w.open(p, Some(line));
                         }
                         if close {
                             self.side = None;
@@ -748,7 +1048,70 @@ impl eframe::App for MureApp {
             acts.extend(self.header(ui));
             let accept = !self.dialog_open();
             let sel = self.sel;
-            if let Some((rows, cols)) = term::show(ui, &mut self.sessions[sel], &mut self.term, accept) {
+            let cwd = self.sessions[sel].cwd.clone();
+            let w = self.ws.entry(cwd.clone()).or_insert_with(|| Workspace::new(cwd.clone()));
+            if let Some(t) = tab_bar(ui, w, &self.sessions[sel]) {
+                match t {
+                    TabAct::Select(a) => {
+                        w.active = a;
+                        if a.is_none() {
+                            self.grab_term = true;
+                        }
+                    }
+                    TabAct::Close(i) if w.docs[i].dirty() => self.confirm = Some(Confirm::CloseDoc(cwd.clone(), i)),
+                    TabAct::Close(i) => w.close(i),
+                }
+            }
+            let grab = std::mem::take(&mut self.grab_term);
+            let mut resized = None;
+            let mut doc_acts = Vec::new();
+            if let Some(di) = w.active {
+                if self.dock {
+                    let max_h = (ui.available_height() - 140.0).max(120.0);
+                    egui::TopBottomPanel::bottom("agent-dock")
+                        .resizable(true)
+                        .default_height(260.0)
+                        .height_range(100.0..=max_h)
+                        .frame(Frame::new().fill(TERM_BG))
+                        .show_inside(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.add_space(10.0);
+                                ui.label(RichText::new(format!("エージェント · {}", self.sessions[sel].agent)).size(11.0).color(FAINT));
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui.add(egui::Button::new(RichText::new("隠す ⌘J").size(11.0).color(FAINT)).frame(false)).clicked() {
+                                        self.dock = false;
+                                    }
+                                });
+                            });
+                            resized = term::show(ui, &mut self.sessions[sel], &mut self.term, accept, false, grab);
+                        });
+                }
+                egui::CentralPanel::default().frame(Frame::new().fill(TERM_BG)).show_inside(ui, |ui| {
+                    doc_acts = editor::show(ui, &mut w.docs[di], &cwd, self.term.font_size);
+                });
+                for a in doc_acts {
+                    match a {
+                        DocAction::Save => {
+                            if let Err(e) = w.docs[di].save() {
+                                self.flash = Some((format!("保存できませんでした: {e}"), Instant::now()));
+                            }
+                        }
+                        DocAction::Ask => {
+                            let d = &w.docs[di];
+                            let rel = d.path.strip_prefix(&cwd).unwrap_or(&d.path).to_string_lossy().into_owned();
+                            self.ask = Some(Ask { rel, lines: d.selection, comment: String::new(), first: true });
+                        }
+                        DocAction::OpenInEditor => {
+                            if !open_in(&self.cfg.editor_app, &w.docs[di].path) {
+                                self.flash = Some((format!("{} で開けませんでした", self.cfg.editor_app), Instant::now()));
+                            }
+                        }
+                    }
+                }
+            } else {
+                resized = term::show(ui, &mut self.sessions[sel], &mut self.term, accept, true, grab);
+            }
+            if let Some((rows, cols)) = resized {
                 for s in &mut self.sessions {
                     s.resize(rows, cols);
                 }
@@ -771,6 +1134,49 @@ impl eframe::App for MureApp {
         }
         self.dialogs(ctx);
     }
+}
+
+fn tab_bar(ui: &mut Ui, w: &Workspace, s: &Session) -> Option<TabAct> {
+    if w.docs.is_empty() {
+        return None;
+    }
+    let mut act = None;
+    Frame::new().fill(SIDEBAR_BG).inner_margin(Margin::symmetric(8, 4)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ScrollArea::horizontal().id_salt("tabs").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let tab = |ui: &mut Ui, on: bool, text: RichText| {
+                    let b = egui::Button::new(text)
+                        .fill(if on { TERM_BG } else { Color32::TRANSPARENT })
+                        .stroke(Stroke::new(1.0, if on { BORDER } else { Color32::TRANSPARENT }))
+                        .corner_radius(6.0);
+                    ui.add(b)
+                };
+                let dot = if s.attention { "● " } else if s.busy { "◌ " } else { "" };
+                if tab(ui, w.active.is_none(), RichText::new(format!("{dot}エージェント")).size(12.0).color(if s.attention { WAITING } else { TEXT })).clicked() {
+                    act = Some(TabAct::Select(None));
+                }
+                for (i, d) in w.docs.iter().enumerate() {
+                    let on = w.active == Some(i);
+                    let mark = if d.dirty() { " ●" } else { "" };
+                    let r = tab(ui, on, RichText::new(format!("{}{mark}", d.title())).size(12.0).color(if on { TEXT } else { MUTED }));
+                    if r.clicked() {
+                        act = Some(TabAct::Select(Some(i)));
+                    }
+                    if r.middle_clicked() {
+                        act = Some(TabAct::Close(i));
+                    }
+                    let r = r.on_hover_text(d.path.to_string_lossy());
+                    let _ = r;
+                    if ui.add(egui::Button::new(RichText::new("×").size(12.0).color(FAINT)).frame(false)).on_hover_text("閉じる ⌘W").clicked() {
+                        act = Some(TabAct::Close(i));
+                    }
+                }
+            });
+        });
+    });
+    act
 }
 
 fn status_icon(ui: &mut Ui, s: &Session) {
