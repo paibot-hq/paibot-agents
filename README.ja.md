@@ -86,9 +86,12 @@ paibot-agents -a claude                    # 起動と同時に claude を1つ�
 
 初めて起動すると、入っているエージェント（claude、codex、gemini、cursor-agent、agy、opencode など）、プロジェクトの置き場、エディタを探す短い設定画面が出ます。
 
-## スマホから頼む（paibot.app）
+## スマホから頼む（paibot.app）— 準備中
 
-Paibot Agents は、[paibot.app](https://paibot.app/ja/bots) から仕事を受け取れます。Mac の側からつなぎに行ってつないだままにするので、Mac に外からの入口は開けません。
+> [!NOTE]
+> paibot.app の Bot のページはまだ公開していません。ここに書いているのは、公開したときの使い方です。
+
+Paibot Agents は、paibot.app から仕事を受け取れます。Mac の側からつなぎに行ってつないだままにするので、Mac に外からの入口は開けません。
 
 ```sh
 paibot-agents connect <鍵>   # paibot.app の「Bot」→「つなぐためのコマンドを作る」で出るコマンド

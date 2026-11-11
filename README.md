@@ -92,9 +92,12 @@ paibot-agents -a claude                    # open one claude session right away
 
 On first launch a short setup finds the agents you have installed (claude, codex, gemini, cursor-agent, agy, opencode, …), your projects folder and your editor.
 
-## Ask from your phone (paibot.app)
+## Ask from your phone (paibot.app) — coming soon
 
-Paibot Agents can take work from [paibot.app](https://paibot.app/en/bots). Your Mac dials out and keeps the connection; nothing on it accepts incoming connections.
+> [!NOTE]
+> The Bots page on paibot.app is not open yet. This section describes how it will work.
+
+Paibot Agents can take work from paibot.app. Your Mac dials out and keeps the connection; nothing on it accepts incoming connections.
 
 ```sh
 paibot-agents connect <token>   # the command shown on paibot.app → Bots → "Make the connect command"
