@@ -7,7 +7,7 @@ pub fn send(title: &str, body: &str) {
     }
     let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!(
-        "display notification \"{}\" with title \"{}\" subtitle \"paispace\" sound name \"Glass\"",
+        "display notification \"{}\" with title \"{}\" subtitle \"Paibot Agents\" sound name \"Glass\"",
         esc(body),
         esc(title)
     );

@@ -105,7 +105,7 @@ pub struct Conv {
 
 /// 書き込み中でも読めるように、写しを取ってから開く
 fn read_rows(db: &Path) -> Option<(Vec<u8>, Vec<(i64, i64, i64, Vec<u8>)>)> {
-    let tmp = std::env::temp_dir().join(format!("paispace-agy-{}-{}", std::process::id(), db.file_stem()?.to_string_lossy()));
+    let tmp = std::env::temp_dir().join(format!("paibot-agents-agy-{}-{}", std::process::id(), db.file_stem()?.to_string_lossy()));
     let _ = std::fs::create_dir_all(&tmp);
     let name = db.file_name()?.to_string_lossy().into_owned();
     std::fs::copy(db, tmp.join(&name)).ok()?;
@@ -320,7 +320,7 @@ mod tests {
 
     #[test]
     fn reads_a_conversation_db() {
-        let dir = std::env::temp_dir().join(format!("paispace-agy-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("paibot-agents-agy-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("conv-1.db");
         let _ = std::fs::remove_file(&db);

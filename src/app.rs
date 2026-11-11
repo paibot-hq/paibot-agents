@@ -172,7 +172,7 @@ enum Action {
     Child(String),
 }
 
-pub struct PaispaceApp {
+pub struct PaibotAgentsApp {
     cfg: Config,
     sessions: Vec<Session>,
     sel: usize,
@@ -207,10 +207,12 @@ pub struct PaispaceApp {
     wake: Wake,
     allow_close: bool,
     shot: Option<crate::shot::Shot>,
+    /// paibot.app とのつながり（つないでいなければ None）
+    runner: Option<Arc<Mutex<crate::runner::Status>>>,
     window_focused: bool,
 }
 
-impl PaispaceApp {
+impl PaibotAgentsApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         cfg: Config,
@@ -265,8 +267,19 @@ impl PaispaceApp {
             wake,
             allow_close: false,
             shot: crate::shot::Shot::from_env(),
+            runner: None,
             window_focused: true,
         };
+        // paibot.app とつないでいれば、裏で仕事を受ける（確認用に画面を撮るときはつながない）
+        if !app.cfg.paibot_token.is_empty() && app.shot.is_none() {
+            let st = Arc::new(Mutex::new(crate::runner::Status::default()));
+            crate::runner::spawn(
+                crate::runner::Settings { url: app.cfg.paibot_url.clone(), token: app.cfg.paibot_token.clone(), bots: app.cfg.bots.clone() },
+                st.clone(),
+                app.wake.clone(),
+            );
+            app.runner = Some(st);
+        }
         // 初めて起動したときは設定から
         let shot_ui = app.shot.as_ref().map(|s| s.ui.clone()).unwrap_or_default();
         if (!config::exists() && app.shot.is_none()) || shot_ui == "setup" {
@@ -291,7 +304,7 @@ impl PaispaceApp {
             }
         }
         // 確認用: ワークスペースのセッションを1つ始める
-        if let (Ok(f), true) = (std::env::var("PAISPACE_SHOT_START_WS"), app.shot.is_some()) {
+        if let (Ok(f), true) = (std::env::var("PAIBOT_AGENTS_SHOT_START_WS"), app.shot.is_some()) {
             if let Some(p) = crate::projects::workspace_projects(std::path::Path::new(&f)).into_iter().find(|p| !p.roots.is_empty()) {
                 let agent = app.cfg.default_agent_index();
                 let name = p.name.trim_end_matches(l!("（ワークスペース）", " (workspace)")).to_string();
@@ -300,7 +313,7 @@ impl PaispaceApp {
                 }
             }
         }
-        if let (Ok(list), true) = (std::env::var("PAISPACE_SHOT_AGENTS"), app.shot.is_some()) {
+        if let (Ok(list), true) = (std::env::var("PAIBOT_AGENTS_SHOT_AGENTS"), app.shot.is_some()) {
             for item in list.split(',') {
                 // 「エージェント@フォルダ」でフォルダも選べる
                 let (name, at) = item.split_once('@').map(|(a, b)| (a, b.to_string())).unwrap_or((item, tilde(&dir)));
@@ -320,14 +333,14 @@ impl PaispaceApp {
             "resume" => app.apply(Action::ResumeAll),
             "new" => {
                 app.open_new();
-                if let (Ok(f), Some(p)) = (std::env::var("PAISPACE_SHOT_WORKSPACE"), app.picker.as_mut()) {
+                if let (Ok(f), Some(p)) = (std::env::var("PAIBOT_AGENTS_SHOT_WORKSPACE"), app.picker.as_mut()) {
                     p.open_workspace(PathBuf::from(f));
                 }
             }
             "diff" if !app.sessions.is_empty() => app.apply(Action::Diff(0)),
             "files" | "ask" | "quick" | "search" if !app.sessions.is_empty() => {
                 app.apply(Action::Files(0));
-                if let Ok(f) = std::env::var("PAISPACE_SHOT_OPEN") {
+                if let Ok(f) = std::env::var("PAIBOT_AGENTS_SHOT_OPEN") {
                     let p = app.sessions[0].cwd.join(f);
                     app.apply(Action::Open(p, Some(30)));
                 }
@@ -344,7 +357,7 @@ impl PaispaceApp {
                 }
                 if shot_ui == "search" {
                     app.side = Some(Side::Search);
-                    let q = std::env::var("PAISPACE_SHOT_QUERY").unwrap_or_else(|_| "fn ".into());
+                    let q = std::env::var("PAIBOT_AGENTS_SHOT_QUERY").unwrap_or_else(|_| "fn ".into());
                     let roots = app.sessions[0].view_roots();
                     if let Some(w) = app.cur_ws() {
                         w.search.set_and_run(&q, &roots);
@@ -533,7 +546,7 @@ impl PaispaceApp {
             })
             .collect();
         list.extend(self.dormant.iter().cloned());
-        if self.shot.is_none() || std::env::var_os("PAISPACE_CONFIG_DIR").is_some() {
+        if self.shot.is_none() || std::env::var_os("PAIBOT_AGENTS_CONFIG_DIR").is_some() {
             resume::save(&list);
         }
     }
@@ -866,6 +879,23 @@ impl PaispaceApp {
                         }
                     });
                     ui.add_space(6.0);
+                }
+                if let Some(st) = &self.runner {
+                    let s = st.lock().unwrap().clone();
+                    ui.horizontal(|ui| {
+                        let (dot, text) = if s.connected {
+                            (OK, if s.running > 0 { lf!("paibot · 動作中 {}", "paibot · running {}", s.running) } else { l!("paibot につながっています", "Connected to paibot").to_string() })
+                        } else {
+                            (FAINT, l!("paibot につながっていません", "Not connected to paibot").to_string())
+                        };
+                        ui.label(RichText::new("●").size(9.0).color(dot));
+                        let tip = s.last_error.clone().unwrap_or_else(|| s.recent.join("\n"));
+                        let r = ui.label(RichText::new(text).size(11.5).color(MUTED));
+                        if !tip.is_empty() {
+                            r.on_hover_text(tip);
+                        }
+                    });
+                    ui.add_space(2.0);
                 }
                 ui.horizontal(|ui| {
                     let r = ui.add(egui::Button::new(RichText::new(lf!("{}  設定", "{}  Settings", ui::icon::GEAR_SIX)).size(12.0).color(FAINT)).frame(false));
@@ -1541,7 +1571,7 @@ impl PaispaceApp {
     }
 }
 
-impl eframe::App for PaispaceApp {
+impl eframe::App for PaibotAgentsApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_millis(120));
         self.window_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
@@ -1639,7 +1669,7 @@ impl eframe::App for PaispaceApp {
                 ui::drag_area(ui, Rect::from_min_size(full.min, vec2(full.width(), 38.0)), "empty-drag");
                 ui.vertical_centered(|ui| {
                     ui.add_space((ui.available_height() * 0.28).max(40.0));
-                    ui.label(RichText::new("paispace").font(ui::bold(30.0)).color(TEXT));
+                    ui.label(RichText::new("Paibot Agents").font(ui::bold(30.0)).color(TEXT));
                     ui.add_space(2.0);
                     ui.label(RichText::new(l!("エージェントと一緒に書く", "Write code with your agents")).size(13.0).color(FAINT));
                     ui.add_space(26.0);

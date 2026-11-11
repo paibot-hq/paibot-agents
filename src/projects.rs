@@ -43,7 +43,7 @@ fn project(p: &Path, group: &str) -> Option<Project> {
     })
 }
 
-/// paispace で最近使ったもの → VSCode のワークスペース → VSCode で最近開いたフォルダ → 個別に登録したもの → 置き場の中（最近さわった順）
+/// Paibot Agents で最近使ったもの → VSCode のワークスペース → VSCode で最近開いたフォルダ → 個別に登録したもの → 置き場の中（最近さわった順）
 pub fn list(cfg: &Config, recent: &[String]) -> Vec<Project> {
     let mut out: Vec<Project> = Vec::new();
     let mut seen = std::collections::HashSet::new();

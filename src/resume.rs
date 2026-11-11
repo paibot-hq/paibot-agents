@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn finds_codex_session() {
-        let root = std::env::temp_dir().join(format!("paispace-codex-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("paibot-agents-codex-{}", std::process::id()));
         let day = root.join("2026/11/10");
         std::fs::create_dir_all(&day).unwrap();
         let started = SystemTime::now();

@@ -37,6 +37,30 @@ pub struct Config {
     pub min_busy_secs: f64,
     pub scrollback: usize,
     pub agents: Vec<Agent>,
+    /// paibot.app から仕事を受け取る（paibot-agents connect で設定する）
+    pub paibot_url: String,
+    pub paibot_token: String,
+    /// paibot.app から頼める Bot。ここに書いたものだけが、書いたフォルダで動く
+    pub bots: Vec<BotDef>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct BotDef {
+    pub name: String,
+    /// claude / codex / agy / echo（echo は試し用。頼まれた文をそのまま返す）
+    pub agent: String,
+    /// この Bot が動くフォルダ
+    pub folder: String,
+    /// 一覧に出す説明
+    #[serde(default)]
+    pub note: String,
+    /// エージェントに足す引数（例: claude の --model）
+    #[serde(default)]
+    pub args: String,
+    /// true にすると、ファイルを書いたりコマンドを実行したりできる（そのフォルダのエージェントの設定どおり）。
+    /// 初めは false: paibot.app から頼まれた仕事は読むだけで、.env や鍵のファイルも読めない
+    #[serde(default)]
+    pub write: bool,
 }
 
 impl Default for Config {
@@ -55,6 +79,9 @@ impl Default for Config {
             min_busy_secs: 5.0,
             scrollback: 10000,
             agents: default_agents(),
+            paibot_url: "https://paibot.app".into(),
+            paibot_token: String::new(),
+            bots: Vec::new(),
         }
     }
 }
@@ -74,17 +101,19 @@ fn default_agents() -> Vec<Agent> {
 }
 
 pub fn dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("PAISPACE_CONFIG_DIR") {
+    if let Some(d) = std::env::var_os("PAIBOT_AGENTS_CONFIG_DIR") {
         return PathBuf::from(d);
     }
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"));
-    let dir = base.join("paispace");
-    // 以前の名前（mure）の設定とセッションの記録を引き継ぐ
-    let old = base.join("mure");
-    if !dir.exists() && old.is_dir() {
-        let _ = std::fs::rename(&old, &dir);
+    let dir = base.join("paibot-agents");
+    // 以前の名前（paispace、その前は mure）の設定とセッションの記録を引き継ぐ
+    for old in ["paispace", "mure"] {
+        let old = base.join(old);
+        if !dir.exists() && old.is_dir() {
+            let _ = std::fs::rename(&old, &dir);
+        }
     }
     dir
 }
@@ -118,7 +147,14 @@ pub fn load() -> (Config, Option<String>) {
 pub fn save(c: &Config) -> Result<()> {
     std::fs::create_dir_all(dir())?;
     let body = toml::to_string_pretty(c)?;
-    std::fs::write(path(), lf!("# paispace の設定。paispace の設定画面（⌘,）からも変えられます。\n\n{body}", "# paispace settings. You can also change these in paispace (⌘,).\n\n{body}"))?;
+    let file = path();
+    std::fs::write(&file, lf!("# Paibot Agents の設定。Paibot Agents の設定画面（⌘,）からも変えられます。\n\n{body}", "# Paibot Agents settings. You can also change these in Paibot Agents (⌘,).\n\n{body}"))?;
+    // paibot.app とつなぐ鍵が入るので、自分だけが読めるようにする
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 
