@@ -54,9 +54,13 @@ pub struct BotDef {
     /// 一覧に出す説明
     #[serde(default)]
     pub note: String,
-    /// エージェントに足す引数（例: claude の --allowedTools）
+    /// エージェントに足す引数（例: claude の --model）
     #[serde(default)]
     pub args: String,
+    /// true にすると、ファイルを書いたりコマンドを実行したりできる（そのフォルダのエージェントの設定どおり）。
+    /// 初めは false: paibot.app から頼まれた仕事は読むだけで、.env や鍵のファイルも読めない
+    #[serde(default)]
+    pub write: bool,
 }
 
 impl Default for Config {
@@ -141,7 +145,14 @@ pub fn load() -> (Config, Option<String>) {
 pub fn save(c: &Config) -> Result<()> {
     std::fs::create_dir_all(dir())?;
     let body = toml::to_string_pretty(c)?;
-    std::fs::write(path(), lf!("# paispace の設定。paispace の設定画面（⌘,）からも変えられます。\n\n{body}", "# paispace settings. You can also change these in paispace (⌘,).\n\n{body}"))?;
+    let file = path();
+    std::fs::write(&file, lf!("# paispace の設定。paispace の設定画面（⌘,）からも変えられます。\n\n{body}", "# paispace settings. You can also change these in paispace (⌘,).\n\n{body}"))?;
+    // paibot.app とつなぐ鍵が入るので、自分だけが読めるようにする
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 

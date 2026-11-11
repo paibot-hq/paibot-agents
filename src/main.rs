@@ -165,13 +165,15 @@ fn connect(args: &[String]) -> Result<()> {
                 folder: here.clone(),
                 note: String::new(),
                 args: String::new(),
+                write: false,
             });
         }
     }
     config::save(&cfg)?;
     println!("{}", lf!("{} とつなぐ設定を書きました: {}", "Saved the connection to {}: {}", cfg.paibot_url, config::path().display()));
     for b in &cfg.bots {
-        println!("  @{}  {}  {}", b.name, b.agent, b.folder);
+        let mode = if b.write { l!("書き込み・実行もできる", "may write and run commands") } else { l!("読むだけ", "read-only") };
+        println!("  @{}  {}  {}  ({mode})", b.name, b.agent, b.folder);
     }
     println!("{}", l!("paispace を開いている間（または paispace runner の間）、paibot.app から頼めます。", "While paispace (or paispace runner) is running, you can ask from paibot.app."));
     Ok(())

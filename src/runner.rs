@@ -80,12 +80,25 @@ fn clip(s: &str, n: usize) -> String {
 }
 
 /// 頼まれた文はコマンドの文字列に埋め込まず、環境変数で渡す（シェルの解釈を受けないように）
+/// claude が読むだけのときに読ませないファイル（秘密が入りがちなもの）
+const CLAUDE_DENY: &str = r#"{"permissions":{"deny":["Read(**/.env*)","Read(**/.dev.vars*)","Read(**/*.pem)","Read(**/*.key)","Read(**/id_rsa*)","Read(**/id_ed25519*)","Read(~/.ssh/**)","Read(~/.aws/**)","Read(~/.config/**)","Read(~/.claude/**)","Read(~/.codex/**)","Read(~/.gemini/**)"]}}"#;
+
+/// Bot を動かすコマンド。write でない Bot は読むだけ:
+/// claude は --restricted（コマンドを実行する道具と自分の設定の許可を外す）で Read/Grep/Glob だけ、MCP なし、秘密のファイルは読めない。
+/// codex は read-only のサンドボックス、agy は計画だけ（plan）でサンドボックス
 pub fn command_for(bot: &BotDef) -> Option<String> {
     let extra = bot.args.trim();
+    let ro = !bot.write;
     let line = match bot.agent.as_str() {
-        "claude" => format!("claude -p \"$PAIBOT_PROMPT\" --output-format stream-json --verbose {extra}"),
-        "codex" => format!("codex exec --skip-git-repo-check -o \"$PAIBOT_OUT\" {extra} \"$PAIBOT_PROMPT\""),
-        "agy" => format!("agy -p \"$PAIBOT_PROMPT\" {extra}"),
+        "claude" => {
+            let limit = if ro { format!(" --restricted --strict-mcp-config --tools Read,Grep,Glob --settings '{CLAUDE_DENY}'") } else { String::new() };
+            format!("claude -p \"$PAIBOT_PROMPT\" --output-format stream-json --verbose{limit} {extra}")
+        }
+        "codex" => {
+            let sandbox = if ro { "read-only" } else { "workspace-write" };
+            format!("codex exec --skip-git-repo-check --sandbox {sandbox} -o \"$PAIBOT_OUT\" {extra} \"$PAIBOT_PROMPT\"")
+        }
+        "agy" => format!("agy -p \"$PAIBOT_PROMPT\"{} {extra}", if ro { " --mode plan --sandbox" } else { "" }),
         "echo" => "printf 'echo: %s' \"$PAIBOT_PROMPT\"".to_string(),
         _ => return None,
     };
@@ -348,7 +361,7 @@ mod tests {
     use super::*;
 
     fn bot(agent: &str) -> BotDef {
-        BotDef { name: "t".into(), agent: agent.into(), folder: std::env::temp_dir().to_string_lossy().into_owned(), note: String::new(), args: String::new() }
+        BotDef { name: "t".into(), agent: agent.into(), folder: std::env::temp_dir().to_string_lossy().into_owned(), note: String::new(), args: String::new(), write: false }
     }
 
     #[test]
@@ -357,6 +370,17 @@ mod tests {
         assert_eq!(ws_url("http://localhost:3002"), "ws://localhost:3002/api/bots/runner");
         assert!(command_for(&bot("claude")).unwrap().starts_with("claude -p \"$PAIBOT_PROMPT\""));
         assert!(command_for(&bot("rm")).is_none());
+        // 初めは読むだけ
+        let claude = command_for(&bot("claude")).unwrap();
+        assert!(claude.contains("--restricted") && claude.contains("--tools Read,Grep,Glob") && claude.contains("Read(**/.env*)"));
+        assert!(command_for(&bot("codex")).unwrap().contains("--sandbox read-only"));
+        assert!(command_for(&bot("agy")).unwrap().contains("--mode plan --sandbox"));
+        // write = true にしたときだけ外れる
+        let mut w = bot("claude");
+        w.write = true;
+        assert!(!command_for(&w).unwrap().contains("--restricted"));
+        w.agent = "codex".into();
+        assert!(command_for(&w).unwrap().contains("--sandbox workspace-write"));
     }
 
     #[test]
