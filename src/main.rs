@@ -133,7 +133,7 @@ fn main() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("{}", lf!("ウィンドウを開けませんでした: {e}", "Could not open the window: {e}")))
 }
 
-/// paibot.app の Bot のページで作った鍵を設定に書く。Bot が1つも無ければ、今いるフォルダの claude を1つ足す
+/// paibot.app の Bot のページで作った鍵を設定に書く。Bot が1つも無ければ、入っているエージェントを今いるフォルダで足す
 fn connect(args: &[String]) -> Result<()> {
     let mut token = None;
     let mut url = None;
@@ -150,15 +150,23 @@ fn connect(args: &[String]) -> Result<()> {
     if let Some(u) = url {
         cfg.paibot_url = u;
     }
+    // まだ Bot が無ければ、入っているエージェント（claude / codex / agy）を今いるフォルダで1つずつ足す。
+    // 同じことを何人かに頼んで答えを比べられるように。どれも見つからなければ claude を足す
     if cfg.bots.is_empty() {
-        let here = std::env::current_dir()?;
-        cfg.bots.push(config::BotDef {
-            name: "claude".into(),
-            agent: "claude".into(),
-            folder: util::tilde(&here),
-            note: String::new(),
-            args: String::new(),
-        });
+        let here = util::tilde(&std::env::current_dir()?);
+        let mut found: Vec<&str> = ["claude", "codex", "agy"].into_iter().filter(|a| on_path(a)).collect();
+        if found.is_empty() {
+            found.push("claude");
+        }
+        for agent in found {
+            cfg.bots.push(config::BotDef {
+                name: agent.into(),
+                agent: agent.into(),
+                folder: here.clone(),
+                note: String::new(),
+                args: String::new(),
+            });
+        }
     }
     config::save(&cfg)?;
     println!("{}", lf!("{} とつなぐ設定を書きました: {}", "Saved the connection to {}: {}", cfg.paibot_url, config::path().display()));
@@ -326,4 +334,13 @@ fn setup(ctx: &egui::Context) {
         s.spacing.scroll = egui::style::ScrollStyle::floating();
         s.interaction.selectable_labels = false;
     });
+}
+
+/// そのコマンドが入っているか。PATH に加えて、claude がエイリアスで入れる ~/.claude/local も見る
+fn on_path(cmd: &str) -> bool {
+    let mut dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(std::path::PathBuf::from(home).join(".claude/local"));
+    }
+    dirs.iter().any(|dir| dir.join(cmd).is_file())
 }
