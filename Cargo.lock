@@ -2573,7 +2573,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "paispace"
+name = "paibot-agents"
 version = "0.2.0"
 dependencies = [
  "anyhow",

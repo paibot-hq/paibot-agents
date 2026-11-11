@@ -1,6 +1,6 @@
 <div align="center">
 
-# paispace
+# Paibot Agents
 
 **コーディングエージェントを並べて動かし、どのエージェントがどれを呼んだかを見る。**
 
@@ -11,7 +11,7 @@ Claude Code・Codex・Antigravity のための、macOS のデスクトップア�
 
 <br>
 
-<img src="docs/agent-map.png" alt="paispace のエージェントマップ" width="920">
+<img src="docs/agent-map.png" alt="Paibot Agents のエージェントマップ" width="920">
 
 </div>
 
@@ -19,7 +19,7 @@ Claude Code・Codex・Antigravity のための、macOS のデスクトップア�
 
 ## なぜ
 
-いまのエージェントは、ほかのエージェントを呼びます。claude が `codex exec` を走らせたり、`Explore` の子エージェントを立てたり、`agy` に画像を作らせたり。でも、それぞれの道具は自分の分しか見せてくれません。paispace は、各エージェントが手元に書いている記録を読んで、**1本のツリー**にまとめます。誰が誰を呼び、何を頼まれ、何をして、何と答えたかが分かります。
+いまのエージェントは、ほかのエージェントを呼びます。claude が `codex exec` を走らせたり、`Explore` の子エージェントを立てたり、`agy` に画像を作らせたり。でも、それぞれの道具は自分の分しか見せてくれません。Paibot Agents は、各エージェントが手元に書いている記録を読んで、**1本のツリー**にまとめます。誰が誰を呼び、何を頼まれ、何をして、何と答えたかが分かります。
 
 <table>
 <tr>
@@ -51,7 +51,7 @@ Claude Code・Codex・Antigravity のための、macOS のデスクトップア�
 
 | エージェント | 読む場所 | 親の見つけ方 |
 |---|---|---|
-| claude の子エージェント | `~/.claude/projects/<フォルダ>/<会話ID>/subagents/agent-*.jsonl` と `.meta.json` | 記録にある親の会話 ID（paispace が `--session-id` で決める）と、孫の `parentAgentId` |
+| claude の子エージェント | `~/.claude/projects/<フォルダ>/<会話ID>/subagents/agent-*.jsonl` と `.meta.json` | 記録にある親の会話 ID（Paibot Agents が `--session-id` で決める）と、孫の `parentAgentId` |
 | `claude -p` | `~/.claude/projects/<フォルダ>/*.jsonl`（`entrypoint: "sdk-cli"`） | 親のコマンドに子への頼みごとそのものがあれば実線、名前だけなら点線 |
 | `codex exec` | `~/.codex/sessions/年/月/日/rollout-*.jsonl`（`source: "exec"`） | 同上 |
 | `agy` | `~/.gemini/antigravity-cli/conversations/<ID>.db`（SQLite と protobuf。写しを取ってから読む） | 同上。agy 自身の子エージェントは、最初の知らせにある親の ID |
@@ -61,15 +61,15 @@ Claude Code・Codex・Antigravity のための、macOS のデスクトップア�
 ## 入れる
 
 ```sh
-cargo install --git https://github.com/paibot-hq/paispace
-paispace
+cargo install --git https://github.com/paibot-hq/paibot-agents
+paibot-agents
 ```
 
 Dock から開きたいときは、アプリにまとめます。
 
 ```sh
-git clone https://github.com/paibot-hq/paispace && cd paispace
-sh scripts/bundle.sh ~/Applications   # → ~/Applications/Paispace.app
+git clone https://github.com/paibot-hq/paibot-agents && cd paibot-agents
+sh scripts/bundle.sh ~/Applications   # → ~/Applications/Paibot Agents.app
 ```
 
 > [!NOTE]
@@ -78,21 +78,21 @@ sh scripts/bundle.sh ~/Applications   # → ~/Applications/Paispace.app
 ### 使い方
 
 ```sh
-paispace                              # 今いるフォルダで、新しいセッションの画面が開く
-paispace ~/work/shop                  # フォルダを指定
-paispace ~/work/team.code-workspace   # VSCode のワークスペースから選ぶ
-paispace -a claude                    # 起動と同時に claude を1つ開く
+paibot-agents                              # 今いるフォルダで、新しいセッションの画面が開く
+paibot-agents ~/work/shop                  # フォルダを指定
+paibot-agents ~/work/team.code-workspace   # VSCode のワークスペースから選ぶ
+paibot-agents -a claude                    # 起動と同時に claude を1つ開く
 ```
 
 初めて起動すると、入っているエージェント（claude、codex、gemini、cursor-agent、agy、opencode など）、プロジェクトの置き場、エディタを探す短い設定画面が出ます。
 
 ## スマホから頼む（paibot.app）
 
-paispace は、[paibot.app](https://paibot.app/ja/bots) から仕事を受け取れます。Mac の側からつなぎに行ってつないだままにするので、Mac に外からの入口は開けません。
+Paibot Agents は、[paibot.app](https://paibot.app/ja/bots) から仕事を受け取れます。Mac の側からつなぎに行ってつないだままにするので、Mac に外からの入口は開けません。
 
 ```sh
-paispace connect <鍵>   # paibot.app の「Bot」→「つなぐためのコマンドを作る」で出るコマンド
-paispace runner         # 画面を開かずに仕事だけ受けたいとき
+paibot-agents connect <鍵>   # paibot.app の「Bot」→「つなぐためのコマンドを作る」で出るコマンド
+paibot-agents runner        # 画面を開かずに仕事だけ受けたいとき
 ```
 
 Bot は `config.toml` にだけ書きます。paibot.app から頼めるのは、ここに書いたものだけです。
@@ -124,7 +124,7 @@ args = ""                     # 足したい引数（claude の --allowedTools �
 
 ## 設定
 
-`~/.config/paispace/config.toml` にあります。ふつうは <kbd>⌘,</kbd> の設定画面で変えます。
+`~/.config/paibot-agents/config.toml` にあります。ふつうは <kbd>⌘,</kbd> の設定画面で変えます。
 
 <details>
 <summary>全部の項目</summary>
@@ -159,21 +159,21 @@ cmd = ""                      # 空ならログインシェル
 
 ## いまの状態
 
-paispace はまだ若い道具です。Claude Code・Codex・Antigravity が公開していない記録の形式に頼っているので、どれかが更新されると、マップの一部が壊れることがあります。今は macOS だけで動きます。
+Paibot Agents はまだ若い道具です。Claude Code・Codex・Antigravity が公開していない記録の形式に頼っているので、どれかが更新されると、マップの一部が壊れることがあります。今は macOS だけで動きます。
 
 <details>
 <summary>開発</summary>
 
 `cargo test` で、本物の擬似端末を使うものも含めたテストが走ります。
 
-確認のために、paispace は自分の画面を書き出せます。
+確認のために、Paibot Agents は自分の画面を書き出せます。
 
 ```sh
-PAISPACE_SHOT=out.png PAISPACE_SHOT_SECS=4 PAISPACE_SHOT_UI=map paispace -a shell
+PAIBOT_AGENTS_SHOT=out.png PAIBOT_AGENTS_SHOT_SECS=4 PAIBOT_AGENTS_SHOT_UI=map paibot-agents -a shell
 ```
 
-`PAISPACE_SHOT_UI` には `new | diff | files | setup | ask | quick | search | resume | child | map | timeline` を渡せます。
-`PAISPACE_CONFIG_DIR` で設定の置き場を変えられます。
+`PAIBOT_AGENTS_SHOT_UI` には `new | diff | files | setup | ask | quick | search | resume | child | map | timeline` を渡せます。
+`PAIBOT_AGENTS_CONFIG_DIR` で設定の置き場を変えられます。
 
 </details>
 

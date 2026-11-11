@@ -1,11 +1,11 @@
 <div align="center">
 
-# paispace
+# Paibot Agents
 
 **Run coding agents side by side — and see which agent called which.**
 
 A native macOS workspace for Claude Code, Codex and Antigravity.
-When an agent hands work to another agent, paispace draws the call tree live, across vendors.
+When an agent hands work to another agent, Paibot Agents draws the call tree live, across vendors.
 
 ![macOS](https://img.shields.io/badge/macOS-11%2B-111?logo=apple&logoColor=white)
 ![Rust](https://img.shields.io/badge/built%20with-Rust-b7410e?logo=rust&logoColor=white)
@@ -17,7 +17,7 @@ English · [日本語](README.ja.md)
 
 <br>
 
-<img src="docs/agent-map.png" alt="paispace agent map: two sessions fanning out to claude, codex, agy and subagents" width="920">
+<img src="docs/agent-map.png" alt="Paibot Agents agent map: two sessions fanning out to claude, codex, agy and subagents" width="920">
 
 </div>
 
@@ -25,7 +25,7 @@ English · [日本語](README.ja.md)
 
 ## Why
 
-Agents now call other agents. Claude shells out to `codex exec`, spawns `Explore` subagents, or asks `agy` to draw an image — and each tool only shows its own little piece. paispace reads the logs every agent already writes and stitches them into **one live tree**: who called whom, what they were asked, what they did, and what they answered.
+Agents now call other agents. Claude shells out to `codex exec`, spawns `Explore` subagents, or asks `agy` to draw an image — and each tool only shows its own little piece. Paibot Agents reads the logs every agent already writes and stitches them into **one live tree**: who called whom, what they were asked, what they did, and what they answered.
 
 <table>
 <tr>
@@ -45,7 +45,7 @@ Agents now call other agents. Claude shells out to `codex exec`, spawns `Explore
 | 🕸 **Agent map** <kbd>⌘G</kbd> | Graph or timeline of every session and every agent it called — recursively. Running calls glow; particles flow along the edges. |
 | 🔀 **Cross-vendor** | Claude Code, Codex and Antigravity (`agy`) in one tree, including Claude subagents and agy's own subagents. |
 | 🧷 **Honest edges** | A solid line means the link is in the logs (or the child's exact prompt appears in the parent's command). A dashed line means it is a guess. |
-| 🙅 **No hooks, read-only** | paispace never edits your agent settings. It only reads files the agents already write on your machine. Nothing is sent anywhere. |
+| 🙅 **No hooks, read-only** | Paibot Agents never edits your agent settings. It only reads files the agents already write on your machine. Nothing is sent anywhere. |
 | ⏯ **Resume** | Quit and come back: sessions reopen where the conversation left off (`claude --resume`, `codex resume`). |
 | 🌿 **Worktrees** | Type a branch name and the agent starts in its own git worktree. |
 | ✍️ **Edit & ask** | Open files in tabs, edit, save. Select lines and press <kbd>⌘L</kbd> to drop “`src/cart.ts` lines 12–20: …” into the agent's input. |
@@ -55,9 +55,9 @@ Agents now call other agents. Claude shells out to `codex exec`, spawns `Explore
 
 ## How the call tree is built
 
-| Agent | Where paispace reads | How the parent is found |
+| Agent | Where Paibot Agents reads | How the parent is found |
 |---|---|---|
-| Claude subagent | `~/.claude/projects/<dir>/<session>/subagents/agent-*.jsonl` + `.meta.json` | Recorded: parent session ID (paispace picks it with `--session-id`) and `parentAgentId` for nested subagents |
+| Claude subagent | `~/.claude/projects/<dir>/<session>/subagents/agent-*.jsonl` + `.meta.json` | Recorded: parent session ID (Paibot Agents picks it with `--session-id`) and `parentAgentId` for nested subagents |
 | `claude -p` | `~/.claude/projects/<dir>/*.jsonl` with `entrypoint: "sdk-cli"` | The caller's command contains the child's exact prompt → solid. Only the name → dashed |
 | `codex exec` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` with `source: "exec"` | Same as above |
 | `agy` | `~/.gemini/antigravity-cli/conversations/<id>.db` (SQLite + protobuf, read from a snapshot) | Same as above; agy's own subagents are linked by the parent ID in their first message |
@@ -67,15 +67,15 @@ A caller's command can only be credited as many times as it actually invoked tha
 ## Install
 
 ```sh
-cargo install --git https://github.com/paibot-hq/paispace
-paispace
+cargo install --git https://github.com/paibot-hq/paibot-agents
+paibot-agents
 ```
 
 Prefer the Dock? Build an app bundle:
 
 ```sh
-git clone https://github.com/paibot-hq/paispace && cd paispace
-sh scripts/bundle.sh ~/Applications   # → ~/Applications/Paispace.app
+git clone https://github.com/paibot-hq/paibot-agents && cd paibot-agents
+sh scripts/bundle.sh ~/Applications   # → ~/Applications/Paibot Agents.app
 ```
 
 > [!NOTE]
@@ -84,21 +84,21 @@ sh scripts/bundle.sh ~/Applications   # → ~/Applications/Paispace.app
 ### Usage
 
 ```sh
-paispace                              # launcher opens with the current folder
-paispace ~/work/shop                  # start from a folder
-paispace ~/work/team.code-workspace   # pick from a VSCode workspace
-paispace -a claude                    # open one claude session right away
+paibot-agents                              # launcher opens with the current folder
+paibot-agents ~/work/shop                  # start from a folder
+paibot-agents ~/work/team.code-workspace   # pick from a VSCode workspace
+paibot-agents -a claude                    # open one claude session right away
 ```
 
 On first launch a short setup finds the agents you have installed (claude, codex, gemini, cursor-agent, agy, opencode, …), your projects folder and your editor.
 
 ## Ask from your phone (paibot.app)
 
-paispace can take work from [paibot.app](https://paibot.app/en/bots). Your Mac dials out and keeps the connection; nothing on it accepts incoming connections.
+Paibot Agents can take work from [paibot.app](https://paibot.app/en/bots). Your Mac dials out and keeps the connection; nothing on it accepts incoming connections.
 
 ```sh
-paispace connect <token>   # the command shown on paibot.app → Bots → "Make the connect command"
-paispace runner            # optional: take work without opening the window
+paibot-agents connect <token>   # the command shown on paibot.app → Bots → "Make the connect command"
+paibot-agents runner            # optional: take work without opening the window
 ```
 
 Bots live only in your `config.toml`. paibot.app can ask for these and nothing else:
@@ -130,7 +130,7 @@ Every other key goes straight to the agent's terminal.
 
 ## Configuration
 
-Settings live in `~/.config/paispace/config.toml`. Most people never touch it — use <kbd>⌘,</kbd>.
+Settings live in `~/.config/paibot-agents/config.toml`. Most people never touch it — use <kbd>⌘,</kbd>.
 
 <details>
 <summary>All options</summary>
@@ -165,21 +165,21 @@ cmd = ""                      # empty = your login shell
 
 ## Status
 
-paispace is young. It leans on log formats that Claude Code, Codex and Antigravity do not document, so an update to any of them can break part of the map. It runs on macOS only for now.
+Paibot Agents is young. It leans on log formats that Claude Code, Codex and Antigravity do not document, so an update to any of them can break part of the map. It runs on macOS only for now.
 
 <details>
 <summary>Development</summary>
 
 `cargo test` runs the unit tests, including real pseudo-terminal tests.
 
-paispace can screenshot itself for visual checks:
+Paibot Agents can screenshot itself for visual checks:
 
 ```sh
-PAISPACE_SHOT=out.png PAISPACE_SHOT_SECS=4 PAISPACE_SHOT_UI=map paispace -a shell
+PAIBOT_AGENTS_SHOT=out.png PAIBOT_AGENTS_SHOT_SECS=4 PAIBOT_AGENTS_SHOT_UI=map paibot-agents -a shell
 ```
 
-`PAISPACE_SHOT_UI` accepts `new | diff | files | setup | ask | quick | search | resume | child | map | timeline`.
-`PAISPACE_CONFIG_DIR` points paispace at a separate settings folder.
+`PAIBOT_AGENTS_SHOT_UI` accepts `new | diff | files | setup | ask | quick | search | resume | child | map | timeline`.
+`PAIBOT_AGENTS_CONFIG_DIR` points Paibot Agents at a separate settings folder.
 
 </details>
 

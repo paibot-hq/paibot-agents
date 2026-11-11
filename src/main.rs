@@ -34,26 +34,26 @@ use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
 fn help() -> &'static str {
     if i18n::en() {
         "\
-paispace — a desktop app for running coding agents side by side
+paibot-agents — a desktop app for running coding agents side by side
 
-Usage: paispace [-a AGENT] [FOLDER | WORKSPACE.code-workspace]
+Usage: paibot-agents [-a AGENT] [FOLDER | WORKSPACE.code-workspace]
 
   FOLDER            first folder offered for new sessions (default: current directory)
   .code-workspace   open a VSCode workspace and pick from its folders
   -a AGENT          start one session with that agent (claude / codex / shell ...)
 
-Settings: ~/.config/paispace/config.toml"
+Settings: ~/.config/paibot-agents/config.toml"
     } else {
         "\
-paispace — コーディングエージェントを並べて動かすデスクトップアプリ
+paibot-agents — コーディングエージェントを並べて動かすデスクトップアプリ
 
-使い方: paispace [-a エージェント] [フォルダ | ワークスペース.code-workspace]
+使い方: paibot-agents [-a エージェント] [フォルダ | ワークスペース.code-workspace]
 
   フォルダ          新しいセッションの最初のフォルダ（省略すると今いる場所）
   .code-workspace   VSCode のワークスペースを開き、そのフォルダから選ぶ
   -a エージェント   起動と同時にそのエージェントを1つ開く（claude / codex / shell など）
 
-設定は ~/.config/paispace/config.toml"
+設定は ~/.config/paibot-agents/config.toml"
     }
 }
 
@@ -61,7 +61,7 @@ fn main() -> Result<()> {
     // 言語は引数の説明より先に決める
     let (cfg0, _) = config::load();
     i18n::apply(&cfg0.language);
-    // paibot.app とつなぐ: paispace connect <鍵> [--url URL] / 画面なしで仕事を受ける: paispace runner
+    // paibot.app とつなぐ: paibot-agents connect <鍵> [--url URL] / 画面なしで仕事を受ける: paibot-agents runner
     let all: Vec<String> = std::env::args().skip(1).collect();
     match all.first().map(String::as_str) {
         Some("connect") => return connect(&all[1..]),
@@ -78,11 +78,11 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             "-V" | "--version" => {
-                println!("paispace {}", env!("CARGO_PKG_VERSION"));
+                println!("paibot-agents {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             "-a" | "--agent" => start = Some(args.next().ok_or_else(|| anyhow::anyhow!(l!("-a のあとにエージェント名が要ります", "-a needs an agent name")))?),
-            _ if dir.is_some() => anyhow::bail!(l!("フォルダは1つだけ指定できます（paispace --help）", "Only one folder can be given (paispace --help)")),
+            _ if dir.is_some() => anyhow::bail!(l!("フォルダは1つだけ指定できます（paibot-agents --help）", "Only one folder can be given (paibot-agents --help)")),
             _ => dir = Some(PathBuf::from(a)),
         }
     }
@@ -113,7 +113,7 @@ fn main() -> Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("paispace")
+            .with_title("Paibot Agents")
             // タイトルバーを消して、中身を一番上まで広げる（信号機ボタンだけ残る）
             .with_fullsize_content_view(true)
             .with_titlebar_shown(false)
@@ -123,11 +123,11 @@ fn main() -> Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "paispace",
+        "paibot-agents",
         options,
         Box::new(move |cc| {
             setup(&cc.egui_ctx);
-            Ok(Box::new(app::PaispaceApp::new(cc, cfg, cfg_err, dir, start, workspace)))
+            Ok(Box::new(app::PaibotAgentsApp::new(cc, cfg, cfg_err, dir, start, workspace)))
         }),
     )
     .map_err(|e| anyhow::anyhow!("{}", lf!("ウィンドウを開けませんでした: {e}", "Could not open the window: {e}")))
@@ -144,7 +144,7 @@ fn connect(args: &[String]) -> Result<()> {
             _ => token = Some(a.clone()),
         }
     }
-    let token = token.ok_or_else(|| anyhow::anyhow!(l!("使い方: paispace connect <鍵> [--url URL]", "Usage: paispace connect <token> [--url URL]")))?;
+    let token = token.ok_or_else(|| anyhow::anyhow!(l!("使い方: paibot-agents connect <鍵> [--url URL]", "Usage: paibot-agents connect <token> [--url URL]")))?;
     let (mut cfg, _) = config::load();
     cfg.paibot_token = token.trim().to_string();
     if let Some(u) = url {
@@ -175,7 +175,7 @@ fn connect(args: &[String]) -> Result<()> {
         let mode = if b.write { l!("書き込み・実行もできる", "may write and run commands") } else { l!("読むだけ", "read-only") };
         println!("  @{}  {}  {}  ({mode})", b.name, b.agent, b.folder);
     }
-    println!("{}", l!("paispace を開いている間（または paispace runner の間）、paibot.app から頼めます。", "While paispace (or paispace runner) is running, you can ask from paibot.app."));
+    println!("{}", l!("Paibot Agents を開いている間（または paibot-agents runner の間）、paibot.app から頼めます。", "While Paibot Agents (or paibot-agents runner) is running, you can ask from paibot.app."));
     Ok(())
 }
 
@@ -186,7 +186,7 @@ fn run_headless() -> Result<()> {
         anyhow::bail!(e);
     }
     if cfg.paibot_token.is_empty() {
-        anyhow::bail!(l!("まだつながっていません。paibot.app の Bot のページで鍵を作り、paispace connect <鍵> を実行してください。", "Not connected yet. Make a token on the Bots page of paibot.app and run: paispace connect <token>"));
+        anyhow::bail!(l!("まだつながっていません。paibot.app の Bot のページで鍵を作り、paibot-agents connect <鍵> を実行してください。", "Not connected yet. Make a token on the Bots page of paibot.app and run: paibot-agents connect <token>"));
     }
     let status = std::sync::Arc::new(std::sync::Mutex::new(runner::Status::default()));
     let (tx, rx) = std::sync::mpsc::channel::<()>();

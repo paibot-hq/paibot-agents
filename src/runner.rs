@@ -154,14 +154,14 @@ pub fn run_task(bot: &BotDef, prompt: &str, progress: &dyn Fn(String)) -> (bool,
     if !folder.is_dir() {
         return (false, format!("フォルダがありません: {}", bot.folder));
     }
-    let out_file = std::env::temp_dir().join(format!("paispace-task-{}.txt", std::process::id() ^ Instant::now().elapsed().subsec_nanos()));
+    let out_file = std::env::temp_dir().join(format!("paibot-agents-task-{}.txt", std::process::id() ^ Instant::now().elapsed().subsec_nanos()));
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let mut child = match Command::new(&shell)
         .args(["-l", "-i", "-c", &cmd])
         .current_dir(&folder)
         .env("PAIBOT_PROMPT", prompt)
         .env("PAIBOT_OUT", &out_file)
-        // paispace を Claude Code の中から起動しても、その印を子に引き継がない
+        // Paibot Agents を Claude Code の中から起動しても、その印を子に引き継がない
         .env_remove("CLAUDECODE")
         .env_remove("CLAUDE_CODE_CHILD_SESSION")
         .env_remove("CLAUDE_CODE_ENTRYPOINT")

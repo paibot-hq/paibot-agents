@@ -437,7 +437,7 @@ pub fn scan_claude(root: &Path, watch: &Watch, cache: &mut Cache) -> Vec<Child> 
             let mtime = md.modified().unwrap_or(created);
             let id = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             if watch.claude_ids.iter().any(|(sid, _)| *sid == id) {
-                continue; // paispace が開いた claude そのもの
+                continue; // Paibot Agents が開いた claude そのもの
             }
             let c = cached(cache, &p, mtime, || {
                 (first_entrypoint(&p).as_deref() == Some("sdk-cli"))
@@ -668,12 +668,12 @@ pub struct Watch {
     pub since: Option<SystemTime>,
     /// 見張るフォルダ（セッションのフォルダ）
     pub dirs: Vec<PathBuf>,
-    /// paispace が開いた claude の会話 ID とそのフォルダ（子エージェントを探す）
+    /// Paibot Agents が開いた claude の会話 ID とそのフォルダ（子エージェントを探す）
     pub claude_ids: Vec<(String, PathBuf)>,
 }
 
 /// 裏で2秒ごとに集め直す
-/// paispace が開いた claude のセッションが実行したコマンド（会話 ID → コマンド）
+/// Paibot Agents が開いた claude のセッションが実行したコマンド（会話 ID → コマンド）
 pub type SessionCommands = Arc<Mutex<HashMap<String, Vec<String>>>>;
 
 pub fn spawn_watcher(watch: Arc<Mutex<Watch>>, out: Arc<Mutex<Vec<Child>>>, session_cmds: SessionCommands, wake: Wake) {
@@ -732,7 +732,7 @@ mod tests {
 
     #[test]
     fn reads_called_codex() {
-        let root = std::env::temp_dir().join(format!("paispace-children-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("paibot-agents-children-{}", std::process::id()));
         let day = root.join("2026/11/10");
         std::fs::create_dir_all(&day).unwrap();
         let since = SystemTime::now() - Duration::from_secs(5);
@@ -844,7 +844,7 @@ mod tests {
 
     #[test]
     fn reads_called_claude_and_subagents() {
-        let root = std::env::temp_dir().join(format!("paispace-claude-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("paibot-agents-claude-{}", std::process::id()));
         let cwd = PathBuf::from("/w/my.app");
         let dir = claude_project_dir(&root, &cwd);
         assert!(dir.ends_with("-w-my-app"));
@@ -858,7 +858,7 @@ mod tests {
             r#"{"type":"assistant","entrypoint":"sdk-cli","message":{"role":"assistant","content":[{"type":"text","text":"こんにちは"}],"stop_reason":"end_turn"}}"#,
         ];
         std::fs::write(dir.join("called-1.jsonl"), called.join("\n")).unwrap();
-        // 普通に開いた claude（cli）と、paispace が開いた claude そのものは数えない
+        // 普通に開いた claude（cli）と、Paibot Agents が開いた claude そのものは数えない
         std::fs::write(dir.join("mine.jsonl"), r#"{"type":"user","entrypoint":"cli","message":{"role":"user","content":"x"}}"#).unwrap();
         std::fs::write(dir.join("parent-1.jsonl"), r#"{"type":"user","entrypoint":"sdk-cli","message":{"role":"user","content":"x"}}"#).unwrap();
         std::fs::write(dir.join("parent-1/subagents/agent-s1.jsonl"), r#"{"type":"user","isSidechain":true,"message":{"role":"user","content":"調べて"}}"#).unwrap();
