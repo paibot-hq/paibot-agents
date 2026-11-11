@@ -15,6 +15,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
+tungstenite = { version = "0.24", features = ["native-tls"] }
 rfd = "0.15"
 png = "0.17"
 egui-phosphor = "0.10"

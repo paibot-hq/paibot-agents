@@ -86,6 +86,28 @@ paispace -a claude                    # 起動と同時に claude を1つ開く
 
 初めて起動すると、入っているエージェント（claude、codex、gemini、cursor-agent、agy、opencode など）、プロジェクトの置き場、エディタを探す短い設定画面が出ます。
 
+## スマホから頼む（paibot.app）
+
+paispace は、[paibot.app](https://paibot.app/ja/bots) から仕事を受け取れます。Mac の側からつなぎに行ってつないだままにするので、Mac に外からの入口は開けません。
+
+```sh
+paispace connect <鍵>   # paibot.app の「Bot」→「つなぐためのコマンドを作る」で出るコマンド
+paispace runner         # 画面を開かずに仕事だけ受けたいとき
+```
+
+Bot は `config.toml` にだけ書きます。paibot.app から頼めるのは、ここに書いたものだけです。
+
+```toml
+[[bots]]
+name = "番人"
+agent = "claude"              # claude | codex | agy | echo（echo は試し用。頼まれた文をそのまま返す）
+folder = "~/work/shop"
+note = "ショップを見張る"
+args = ""                     # 足したい引数（claude の --allowedTools など）
+```
+
+頼まれた文は環境変数でエージェントに渡すので、シェルの命令として解釈されることはありません。つながっているかどうかは、サイドバーの下に出ます。
+
 ## キー
 
 | キー | 動き | キー | 動き |

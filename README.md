@@ -92,6 +92,28 @@ paispace -a claude                    # open one claude session right away
 
 On first launch a short setup finds the agents you have installed (claude, codex, gemini, cursor-agent, agy, opencode, …), your projects folder and your editor.
 
+## Ask from your phone (paibot.app)
+
+paispace can take work from [paibot.app](https://paibot.app/en/bots). Your Mac dials out and keeps the connection; nothing on it accepts incoming connections.
+
+```sh
+paispace connect <token>   # the command shown on paibot.app → Bots → "Make the connect command"
+paispace runner            # optional: take work without opening the window
+```
+
+Bots live only in your `config.toml`. paibot.app can ask for these and nothing else:
+
+```toml
+[[bots]]
+name = "watch"
+agent = "claude"              # claude | codex | agy | echo (echo answers with the prompt, for testing)
+folder = "~/work/shop"
+note = "keeps an eye on the shop"
+args = ""                     # extra flags, e.g. --allowedTools for claude
+```
+
+The prompt reaches the agent as an environment variable, never as shell text. The sidebar shows whether paibot is connected.
+
 ## Keyboard
 
 | Key | Action | Key | Action |

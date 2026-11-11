@@ -207,6 +207,8 @@ pub struct PaispaceApp {
     wake: Wake,
     allow_close: bool,
     shot: Option<crate::shot::Shot>,
+    /// paibot.app とのつながり（つないでいなければ None）
+    runner: Option<Arc<Mutex<crate::runner::Status>>>,
     window_focused: bool,
 }
 
@@ -265,8 +267,19 @@ impl PaispaceApp {
             wake,
             allow_close: false,
             shot: crate::shot::Shot::from_env(),
+            runner: None,
             window_focused: true,
         };
+        // paibot.app とつないでいれば、裏で仕事を受ける（確認用に画面を撮るときはつながない）
+        if !app.cfg.paibot_token.is_empty() && app.shot.is_none() {
+            let st = Arc::new(Mutex::new(crate::runner::Status::default()));
+            crate::runner::spawn(
+                crate::runner::Settings { url: app.cfg.paibot_url.clone(), token: app.cfg.paibot_token.clone(), bots: app.cfg.bots.clone() },
+                st.clone(),
+                app.wake.clone(),
+            );
+            app.runner = Some(st);
+        }
         // 初めて起動したときは設定から
         let shot_ui = app.shot.as_ref().map(|s| s.ui.clone()).unwrap_or_default();
         if (!config::exists() && app.shot.is_none()) || shot_ui == "setup" {
@@ -866,6 +879,23 @@ impl PaispaceApp {
                         }
                     });
                     ui.add_space(6.0);
+                }
+                if let Some(st) = &self.runner {
+                    let s = st.lock().unwrap().clone();
+                    ui.horizontal(|ui| {
+                        let (dot, text) = if s.connected {
+                            (OK, if s.running > 0 { lf!("paibot · 動作中 {}", "paibot · running {}", s.running) } else { l!("paibot につながっています", "Connected to paibot").to_string() })
+                        } else {
+                            (FAINT, l!("paibot につながっていません", "Not connected to paibot").to_string())
+                        };
+                        ui.label(RichText::new("●").size(9.0).color(dot));
+                        let tip = s.last_error.clone().unwrap_or_else(|| s.recent.join("\n"));
+                        let r = ui.label(RichText::new(text).size(11.5).color(MUTED));
+                        if !tip.is_empty() {
+                            r.on_hover_text(tip);
+                        }
+                    });
+                    ui.add_space(2.0);
                 }
                 ui.horizontal(|ui| {
                     let r = ui.add(egui::Button::new(RichText::new(lf!("{}  設定", "{}  Settings", ui::icon::GEAR_SIX)).size(12.0).color(FAINT)).frame(false));

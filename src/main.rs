@@ -14,6 +14,7 @@ mod picker;
 mod projects;
 mod quickopen;
 mod resume;
+mod runner;
 mod search;
 mod session;
 mod setup;
@@ -60,6 +61,13 @@ fn main() -> Result<()> {
     // 言語は引数の説明より先に決める
     let (cfg0, _) = config::load();
     i18n::apply(&cfg0.language);
+    // paibot.app とつなぐ: paispace connect <鍵> [--url URL] / 画面なしで仕事を受ける: paispace runner
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    match all.first().map(String::as_str) {
+        Some("connect") => return connect(&all[1..]),
+        Some("runner") => return run_headless(),
+        _ => {}
+    }
     let mut dir = None;
     let mut start = None;
     let mut args = std::env::args().skip(1);
@@ -123,6 +131,74 @@ fn main() -> Result<()> {
         }),
     )
     .map_err(|e| anyhow::anyhow!("{}", lf!("ウィンドウを開けませんでした: {e}", "Could not open the window: {e}")))
+}
+
+/// paibot.app の Bot のページで作った鍵を設定に書く。Bot が1つも無ければ、今いるフォルダの claude を1つ足す
+fn connect(args: &[String]) -> Result<()> {
+    let mut token = None;
+    let mut url = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--url" => url = it.next().cloned(),
+            _ => token = Some(a.clone()),
+        }
+    }
+    let token = token.ok_or_else(|| anyhow::anyhow!(l!("使い方: paispace connect <鍵> [--url URL]", "Usage: paispace connect <token> [--url URL]")))?;
+    let (mut cfg, _) = config::load();
+    cfg.paibot_token = token.trim().to_string();
+    if let Some(u) = url {
+        cfg.paibot_url = u;
+    }
+    if cfg.bots.is_empty() {
+        let here = std::env::current_dir()?;
+        cfg.bots.push(config::BotDef {
+            name: "claude".into(),
+            agent: "claude".into(),
+            folder: util::tilde(&here),
+            note: String::new(),
+            args: String::new(),
+        });
+    }
+    config::save(&cfg)?;
+    println!("{}", lf!("{} とつなぐ設定を書きました: {}", "Saved the connection to {}: {}", cfg.paibot_url, config::path().display()));
+    for b in &cfg.bots {
+        println!("  @{}  {}  {}", b.name, b.agent, b.folder);
+    }
+    println!("{}", l!("paispace を開いている間（または paispace runner の間）、paibot.app から頼めます。", "While paispace (or paispace runner) is running, you can ask from paibot.app."));
+    Ok(())
+}
+
+/// 画面を出さずに、paibot.app からの仕事だけを受ける
+fn run_headless() -> Result<()> {
+    let (cfg, err) = config::load();
+    if let Some(e) = err {
+        anyhow::bail!(e);
+    }
+    if cfg.paibot_token.is_empty() {
+        anyhow::bail!(l!("まだつながっていません。paibot.app の Bot のページで鍵を作り、paispace connect <鍵> を実行してください。", "Not connected yet. Make a token on the Bots page of paibot.app and run: paispace connect <token>"));
+    }
+    let status = std::sync::Arc::new(std::sync::Mutex::new(runner::Status::default()));
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let wake: session::Wake = std::sync::Arc::new(move || {
+        let _ = tx.send(());
+    });
+    runner::spawn(runner::Settings { url: cfg.paibot_url.clone(), token: cfg.paibot_token.clone(), bots: cfg.bots.clone() }, status.clone(), wake);
+    println!("{}", lf!("{} に、Bot {} 人でつなぎます…", "Connecting to {} with {} bots…", cfg.paibot_url, cfg.bots.len()));
+    let mut last = String::new();
+    while rx.recv().is_ok() {
+        let s = status.lock().unwrap().clone();
+        let line = if s.connected {
+            lf!("つながっています · 動作中 {} · 終わった {}", "connected · running {} · done {}", s.running, s.done)
+        } else {
+            lf!("つながっていません: {}", "not connected: {}", s.last_error.unwrap_or_default())
+        };
+        if line != last {
+            println!("{line}");
+            last = line;
+        }
+    }
+    Ok(())
 }
 
 fn load(fonts: &mut FontDefinitions, name: &str, path: &str, index: u32, tweak: Option<egui::FontTweak>) -> bool {

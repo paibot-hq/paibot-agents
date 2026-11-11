@@ -37,6 +37,26 @@ pub struct Config {
     pub min_busy_secs: f64,
     pub scrollback: usize,
     pub agents: Vec<Agent>,
+    /// paibot.app から仕事を受け取る（paispace connect で設定する）
+    pub paibot_url: String,
+    pub paibot_token: String,
+    /// paibot.app から頼める Bot。ここに書いたものだけが、書いたフォルダで動く
+    pub bots: Vec<BotDef>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct BotDef {
+    pub name: String,
+    /// claude / codex / agy / echo（echo は試し用。頼まれた文をそのまま返す）
+    pub agent: String,
+    /// この Bot が動くフォルダ
+    pub folder: String,
+    /// 一覧に出す説明
+    #[serde(default)]
+    pub note: String,
+    /// エージェントに足す引数（例: claude の --allowedTools）
+    #[serde(default)]
+    pub args: String,
 }
 
 impl Default for Config {
@@ -55,6 +75,9 @@ impl Default for Config {
             min_busy_secs: 5.0,
             scrollback: 10000,
             agents: default_agents(),
+            paibot_url: "https://paibot.app".into(),
+            paibot_token: String::new(),
+            bots: Vec::new(),
         }
     }
 }
