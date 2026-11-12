@@ -214,6 +214,8 @@ pub struct PaibotAgentsApp {
     closed: HashSet<u64>,
     /// 最後にデーモンの一覧を見た時刻
     adopted_at: Instant,
+    /// エージェントごとの利用枠（新しいセッションのエージェント選びに使う）
+    usage: crate::usage::Monitor,
 }
 
 impl PaibotAgentsApp {
@@ -238,6 +240,8 @@ impl PaibotAgentsApp {
         if recent.is_empty() && workspace.is_none() {
             recent.push(tilde(&dir));
         }
+        let cfg_agents = cfg.agents.clone();
+        let wake_usage = wake.clone();
         let mut app = Self {
             term: TermState::new(cfg.font_size),
             cfg,
@@ -275,6 +279,7 @@ impl PaibotAgentsApp {
             window_focused: true,
             closed: HashSet::new(),
             adopted_at: Instant::now(),
+            usage: crate::usage::Monitor::spawn(cfg_agents, wake_usage),
         };
         // デーモンで動いているセッションにつなぎ直す。
         // 確認用に画面を撮るときは、撮り終えたら止める（設定フォルダを分けたときだけ、つなぎ直しも試す）
@@ -471,6 +476,7 @@ impl PaibotAgentsApp {
     }
 
     fn open_new(&mut self) {
+        self.usage.refresh();
         self.picker = Some(Picker::new(&self.cfg, &self.recent));
     }
 
@@ -517,7 +523,13 @@ impl PaibotAgentsApp {
             .filter(|s| s.resumable())
             .and_then(|s| s.resume_id.as_deref().and_then(|id| resume::resume_cmd(&base, id).map(|c| (c, Some(id.to_string())))));
         let (cmd, id) = resumed.unwrap_or_else(|| resume::start_cmd(&base));
-        let cmd = if roots.len() > 1 { resume::add_dirs(&cmd, &roots[1..]) } else { cmd };
+        let mut cmd = if roots.len() > 1 { resume::add_dirs(&cmd, &roots[1..]) } else { cmd };
+        // claude の利用枠を知るため、そのセッションだけのステータス表示を差し込む
+        if self.cfg.track_usage && resume::kind(&base) == resume::Kind::Claude {
+            if let Some(extra) = crate::usage::claude_probe_args(&cwd) {
+                cmd.push_str(&extra);
+            }
+        }
         let run = Agent { name: agent.name.clone(), cmd };
         let mut s = Session::spawn(name, &run, cwd.clone(), self.term.size, self.cfg.scrollback, self.wake.clone())?;
         s.base_cmd = base;
@@ -977,6 +989,8 @@ impl PaibotAgentsApp {
         }
 
         let info = self.git_info.lock().unwrap().clone();
+        let usages = self.usage.get();
+        let unix_now = crate::usage::now_secs();
         let kids = self.call_tree();
         let viewing_child = if self.side == Some(Side::Child) { self.child_view.as_ref().map(|v| v.id.clone()) } else { None };
         let now = Instant::now();
@@ -1006,6 +1020,10 @@ impl PaibotAgentsApp {
                         ui.add_space(20.0);
                         ui.spacing_mut().item_spacing.x = 4.0;
                         let mut meta = s.agent.clone();
+                        // そのエージェントの利用枠（分かれば）
+                        if let Some(u) = usages.get(&resume::kind(&s.base_cmd)).map(|u| u.label(unix_now)).filter(|l| !l.is_empty()) {
+                            meta.push_str(&format!(" {u}"));
+                        }
                         if let Some(b) = g.and_then(|g| g.branch.clone()).or_else(|| s.branch.clone()) {
                             if b != s.name {
                                 meta.push_str(&format!("  {} {b}", ui::icon::GIT_BRANCH));
@@ -1419,7 +1437,8 @@ impl PaibotAgentsApp {
 
     fn dialogs(&mut self, ctx: &egui::Context) {
         if let Some(mut p) = self.picker.take() {
-            let shown = p.show(ctx, &self.cfg);
+            let usages = self.usage.get();
+            let shown = p.show(ctx, &self.cfg, &usages);
             // 開いたワークスペースは設定に覚えて、次から一覧に出す
             if let Some(f) = p.opened_workspace.take() {
                 let t = tilde(&f);

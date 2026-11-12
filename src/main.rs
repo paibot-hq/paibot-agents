@@ -25,6 +25,7 @@ mod shot;
 mod term;
 mod theme;
 mod ui;
+mod usage;
 mod util;
 mod vscode;
 
@@ -87,6 +88,8 @@ fn main() -> Result<()> {
     match all.first().map(String::as_str) {
         Some("connect") => return connect(&all[1..]),
         Some("runner") => return run_headless(),
+        // claude が呼ぶステータス表示（利用枠を書き留める）
+        Some("statusline") => return usage::statusline(),
         // ターミナルから: セッションの一覧・つなぐ・始める・止める、デーモン
         Some(c @ ("ls" | "attach" | "a" | "new" | "kill" | "daemon")) => return cli::run(c, &all[1..]),
         _ => {}

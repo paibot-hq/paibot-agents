@@ -22,8 +22,16 @@ pub struct Config {
     pub workspaces: Vec<String>,
     /// VSCode / Cursor などで最近開いたフォルダとワークスペースも一覧に出す
     pub vscode_recent: bool,
-    /// 新規作成で最初に選ばれているエージェント
+    /// 新規作成で最初に選ばれているエージェント（priority が空なら、自動で選ぶときの一番手）
     pub default_agent: String,
+    /// 新しいセッションでエージェントを自動で選ぶときの順番。利用枠が残っている最初のものを使う。
+    /// 空なら default_agent、そのあとは agents の順
+    pub priority: Vec<String>,
+    /// 5時間・1週間の利用枠をこの割合（%）まで使っていたら、次のエージェントにする
+    pub limit_percent: f64,
+    /// claude の利用枠を知るために、そのセッションだけのステータス表示を差し込む
+    /// （ユーザー自身のステータス表示はそのまま呼んで出す。設定ファイルは書き換えない）
+    pub track_usage: bool,
     /// 画面の言語: "auto"（macOS の設定に合わせる）/ "ja" / "en"
     pub language: String,
     /// 「エディタで開く」に使うアプリ
@@ -71,6 +79,9 @@ impl Default for Config {
             workspaces: Vec::new(),
             vscode_recent: true,
             default_agent: "claude".into(),
+            priority: Vec::new(),
+            limit_percent: 90.0,
+            track_usage: true,
             language: "auto".into(),
             editor_app: "Visual Studio Code".into(),
             notify: true,
@@ -89,6 +100,25 @@ impl Default for Config {
 impl Config {
     pub fn default_agent_index(&self) -> usize {
         self.agents.iter().position(|a| a.name == self.default_agent).unwrap_or(0)
+    }
+
+    /// 自動で選ぶときの順番（agents の番号）。シェル（コマンドが空）は入れない
+    pub fn priority_order(&self) -> Vec<usize> {
+        let mut out: Vec<usize> = Vec::new();
+        let mut push = |i: usize| {
+            if !out.contains(&i) && !self.agents[i].cmd.trim().is_empty() {
+                out.push(i);
+            }
+        };
+        for name in self.priority.iter().chain(std::iter::once(&self.default_agent)) {
+            if let Some(i) = self.agents.iter().position(|a| &a.name == name) {
+                push(i);
+            }
+        }
+        for i in 0..self.agents.len() {
+            push(i);
+        }
+        out
     }
 }
 

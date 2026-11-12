@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
     Claude,
     Codex,
@@ -29,7 +29,7 @@ pub fn kind(cmd: &str) -> Kind {
     }
 }
 
-fn quote(p: &Path) -> String {
+pub fn quote(p: &Path) -> String {
     format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"))
 }
 

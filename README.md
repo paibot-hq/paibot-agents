@@ -92,6 +92,14 @@ paibot-agents -a claude                    # open one claude session right away
 
 On first launch a short setup finds the agents you have installed (claude, codex, gemini, cursor-agent, agy, opencode, …), your projects folder and your editor.
 
+### Picking the agent for you
+
+You don't choose an agent for a new session. Paibot Agents walks `priority` and takes the first agent that still has room in its 5-hour and weekly limits; the window shows which one it picked and why ("claude is near its limit · resets in 2h"). Press Tab or "Change" to pick one yourself. The session card shows what is left, e.g. `claude 5h 40% · 1w 12%`.
+
+- **codex**: asked through `codex app-server` (reading does not use up your limit), falling back to its session logs.
+- **claude**: claude only reports its limits to its status line, so sessions started here get `--settings` with a status line that records them and then runs your own status line command, so what you see does not change. Your settings files are not modified. Turn this off with `track_usage = false`.
+- Other agents: unknown, so only `priority` counts.
+
 ### Sessions outlive the window
 
 Agents run inside a small background daemon, so closing the window (or a crash) does not stop them. Open Paibot Agents again and the sessions are there, scrollback included. The daemon starts on its own and exits about 30 seconds after the last agent ends.
@@ -161,6 +169,9 @@ projects = []                 # extra individual folders
 workspaces = []               # .code-workspace files to list
 vscode_recent = true          # also list what you recently opened in VSCode / Cursor
 default_agent = "claude"
+priority = ["claude", "codex"] # order to try for new sessions (empty: default_agent, then agents)
+limit_percent = 90.0          # skip an agent once its 5-hour or weekly limit is this used
+track_usage = true            # read claude's limits through a per-session status line
 editor_app = "Visual Studio Code"
 notify = true
 font_size = 13.0

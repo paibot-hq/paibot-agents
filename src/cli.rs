@@ -117,14 +117,29 @@ fn new(args: &[String]) -> Result<()> {
     }
     let agent = match agent {
         Some(name) => cfg.agents.iter().find(|a| a.name == name).cloned().ok_or_else(|| anyhow::anyhow!("{}", lf!("エージェント「{name}」は設定にありません", "Agent \"{name}\" is not in the settings")))?,
-        None => cfg.agents.get(cfg.default_agent_index()).cloned().ok_or_else(|| anyhow::anyhow!(l!("エージェントが設定にありません", "No agents in the settings")))?,
+        // 指定がなければ、優先度と残りの利用枠で決める
+        None => {
+            let usages = crate::usage::snapshot(&cfg.agents);
+            let a = cfg.agents.get(crate::usage::choose(&cfg, &usages)).cloned().ok_or_else(|| anyhow::anyhow!(l!("エージェントが設定にありません", "No agents in the settings")))?;
+            let left = crate::usage::of(&usages, &a).map(|u| u.label(crate::usage::now_secs())).filter(|l| !l.is_empty());
+            match left {
+                Some(l) => eprintln!("{}", lf!("{} で始めます（{l}）", "Starting with {} ({l})", a.name)),
+                None => eprintln!("{}", lf!("{} で始めます", "Starting with {}", a.name)),
+            }
+            a
+        }
     };
     let cwd = std::fs::canonicalize(dir.unwrap_or(std::env::current_dir()?))?;
     if !cwd.is_dir() {
         bail!("{}", lf!("フォルダがありません: {}", "Folder not found: {}", cwd.display()));
     }
     let name = cwd.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "/".into());
-    let (cmd, resume_id) = crate::resume::start_cmd(&agent.cmd);
+    let (mut cmd, resume_id) = crate::resume::start_cmd(&agent.cmd);
+    if cfg.track_usage && crate::resume::kind(&agent.cmd) == crate::resume::Kind::Claude {
+        if let Some(extra) = crate::usage::claude_probe_args(&cwd) {
+            cmd.push_str(&extra);
+        }
+    }
     let (rows, cols) = term_size().unwrap_or((40, 120));
     let meta = serde_json::json!({ "base_cmd": agent.cmd, "resume_id": resume_id, "roots": [] });
     let mut s = daemon::connect()?;
