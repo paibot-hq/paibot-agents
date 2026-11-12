@@ -213,7 +213,7 @@ Paibot Agents はまだ若い道具です。Claude Code・Codex・Antigravity �
 PAIBOT_AGENTS_SHOT=out.png PAIBOT_AGENTS_SHOT_SECS=4 PAIBOT_AGENTS_SHOT_UI=map paibot-agents -a shell
 ```
 
-`PAIBOT_AGENTS_SHOT_UI` には `new | diff | files | setup | ask | quick | search | resume | child | map | timeline` を渡せます。
+`PAIBOT_AGENTS_SHOT_UI` には `new | diff | files | setup | setup-notes | ask | quick | search | resume | child | map | timeline` を渡せます。
 `PAIBOT_AGENTS_CONFIG_DIR` で設定の置き場を変えられます。
 
 </details>
