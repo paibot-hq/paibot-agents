@@ -1017,9 +1017,14 @@ impl PaibotAgentsApp {
         }
         ui.add_space(10.0);
 
-        if let Some(st) = &self.runner {
-            let s = st.lock().unwrap().clone();
-            egui::TopBottomPanel::bottom("sidebar-foot").frame(Frame::new().inner_margin(Margin { top: 6, ..Default::default() })).show_separator_line(false).show_inside(ui, |ui| {
+        // 下: 利用枠の残りと、paibot.app とのつながり
+        let usages = self.usage.get();
+        let mut refresh = false;
+        egui::TopBottomPanel::bottom("sidebar-foot").frame(Frame::new().inner_margin(Margin { top: 8, ..Default::default() })).show_separator_line(false).show_inside(ui, |ui| {
+            refresh = self.credits(ui, &usages);
+            if let Some(st) = &self.runner {
+                let s = st.lock().unwrap().clone();
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     let (dot, text) = if s.connected {
                         (OK, if s.running > 0 { lf!("paibot · 動作中 {}", "paibot · running {}", s.running) } else { l!("paibot につながっています", "Connected to paibot").to_string() })
@@ -1033,11 +1038,13 @@ impl PaibotAgentsApp {
                         r.on_hover_text(tip);
                     }
                 });
-            });
+            }
+        });
+        if refresh {
+            self.usage.refresh();
         }
 
         let order = self.order();
-        let usages = self.usage.get();
         let unix_now = crate::usage::now_secs();
         let now = Instant::now();
         ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -1138,6 +1145,61 @@ impl PaibotAgentsApp {
             }
         });
         acts
+    }
+
+    /// エージェントごとの利用枠の残り（5時間・1週間）。見出しを押すと読み直す
+    fn credits(&self, ui: &mut Ui, usages: &crate::usage::Usages) -> bool {
+        use crate::usage::{Usage, now_secs, until};
+        // 設定にあるエージェントのうち、枠が分かる種類（claude・codex）を優先度の順に1つずつ
+        let mut kinds: Vec<(resume::Kind, String)> = Vec::new();
+        for i in self.cfg.priority_order() {
+            let a = &self.cfg.agents[i];
+            let k = resume::kind(&a.cmd);
+            if k != resume::Kind::Other && !kinds.iter().any(|(x, _)| *x == k) {
+                kinds.push((k, a.name.clone()));
+            }
+        }
+        if kinds.is_empty() || !self.cfg.track_usage {
+            return false;
+        }
+        let now = now_secs();
+        ui.spacing_mut().interact_size.y = 14.0;
+        ui.spacing_mut().item_spacing.y = 3.0;
+        let head = ui.add(egui::Button::new(RichText::new(l!("残りの枠", "Usage left")).size(11.0).color(FAINT)).frame(false)).on_hover_text(l!("押すと読み直します", "Click to refresh"));
+        ui.add_space(2.0);
+        for (k, name) in kinds {
+            let u = usages.get(&k);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&name).font(ui::bold(12.0)).color(MUTED));
+                if u.is_none_or(|u| u.five_hour.is_none() && u.seven_day.is_none()) {
+                    let why = match k {
+                        resume::Kind::Claude => l!("一度話すと分かります", "Known after you talk to it once"),
+                        _ => l!("まだ分かりません", "Not known yet"),
+                    };
+                    ui.label(RichText::new(why).size(11.0).color(FAINT));
+                }
+            });
+            let Some(u) = u else { continue };
+            for (label, w) in [(l!("5時間", "5 hours"), Usage::live(u.five_hour, now)), (l!("1週間", "1 week"), Usage::live(u.seven_day, now))] {
+                let Some(w) = w else { continue };
+                let left = w.left();
+                let col = if left <= 10.0 { BAD } else if left <= 30.0 { WAITING } else { OK };
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.add_sized(vec2(44.0, 14.0), Label::new(RichText::new(label).size(11.0).color(FAINT)));
+                    let (rect, _) = ui.allocate_exact_size(vec2(70.0, 6.0), Sense::hover());
+                    ui.painter().rect_filled(rect, 3.0, CARD_SEL);
+                    let mut fill = rect;
+                    fill.set_width(rect.width() * (left / 100.0) as f32);
+                    ui.painter().rect_filled(fill, 3.0, col);
+                    ui.label(RichText::new(format!("{left:.0}%")).size(11.0).color(if left <= 30.0 { col } else { MUTED }));
+                    if w.used > 0.0 {
+                        ui.label(RichText::new(lf!("{}に戻る", "resets {}", until(w.resets_at, now))).size(10.5).color(FAINT));
+                    }
+                });
+            }
+        }
+        head.clicked()
     }
 
     /// セッションでできること（一覧の右クリックと、上の「…」で同じものを出す）

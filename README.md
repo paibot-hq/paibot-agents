@@ -95,7 +95,7 @@ On first launch a short setup finds the agents you have installed (claude, codex
 
 ### Picking the agent for you
 
-You don't choose an agent for a new session. Paibot Agents walks `priority` and takes the first agent that still has room in its 5-hour and weekly limits; the window shows which one it picked and why ("claude is near its limit · resets in 2h"). Press Tab or "Change" to pick one yourself. The agent in use and what is left (`claude 5h 40% · 1w 12%`) show small at the top right of the conversation.
+You don't choose an agent for a new session. Paibot Agents walks `priority` and takes the first agent that still has room in its 5-hour and weekly limits; the window shows which one it picked and why ("claude is near its limit · resets in 2h"). Press Tab or "Change" to pick one yourself. What each agent has left (5-hour and weekly) and when it resets is always shown at the bottom of the list.
 
 - **codex**: asked through `codex app-server` (reading does not use up your limit), falling back to its session logs.
 - **claude**: claude only reports its limits to its status line, so sessions started here get `--settings` with a status line that records them and then runs your own status line command, so what you see does not change. Your settings files are not modified. Turn this off with `track_usage = false`.

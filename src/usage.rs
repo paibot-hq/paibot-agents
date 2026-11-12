@@ -27,6 +27,13 @@ pub struct Window {
     pub resets_at: u64,
 }
 
+impl Window {
+    /// 残りの割合（0〜100）
+    pub fn left(&self) -> f64 {
+        (100.0 - self.used).clamp(0.0, 100.0)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     pub five_hour: Option<Window>,
@@ -43,7 +50,7 @@ pub fn now_secs() -> u64 {
 
 impl Usage {
     /// 戻る時刻を過ぎた枠は 0% とみなす
-    fn live(w: Option<Window>, now: u64) -> Option<Window> {
+    pub fn live(w: Option<Window>, now: u64) -> Option<Window> {
         w.map(|w| if w.resets_at <= now { Window { used: 0.0, ..w } } else { w })
     }
 
@@ -57,16 +64,16 @@ impl Usage {
             .max()
     }
 
-    /// 短い表示（例: 5h 40% · 1w 12%）
+    /// 短い表示。残りの割合で出す（例: 残り 5h 60% · 1w 88%）
     pub fn label(&self, now: u64) -> String {
         let mut parts = Vec::new();
         if let Some(w) = Self::live(self.five_hour, now) {
-            parts.push(format!("5h {:.0}%", w.used));
+            parts.push(format!("5h {:.0}%", w.left()));
         }
         if let Some(w) = Self::live(self.seven_day, now) {
-            parts.push(format!("1w {:.0}%", w.used));
+            parts.push(format!("1w {:.0}%", w.left()));
         }
-        parts.join(" · ")
+        if parts.is_empty() { String::new() } else { lf!("残り {}", "{} left", parts.join(" · ")) }
     }
 }
 
