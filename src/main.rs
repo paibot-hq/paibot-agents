@@ -9,6 +9,7 @@ mod daemon;
 mod editor;
 mod files;
 mod git;
+mod handoff;
 mod keys;
 mod map;
 mod notify;

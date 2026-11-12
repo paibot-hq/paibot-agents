@@ -92,6 +92,14 @@ pub fn choose(cfg: &Config, usages: &Usages) -> usize {
     order.iter().copied().min_by_key(|&i| blocked(i).unwrap_or(0)).unwrap_or_else(|| cfg.default_agent_index())
 }
 
+/// 引き継ぎ先: from と別の種類のエージェントから、choose と同じ決め方で選ぶ
+pub fn choose_other(cfg: &Config, usages: &Usages, from: Kind) -> Option<usize> {
+    let now = now_secs();
+    let order: Vec<usize> = cfg.priority_order().into_iter().filter(|&i| from == Kind::Other || resume::kind(&cfg.agents[i].cmd) != from).collect();
+    let blocked = |i: usize| usages.get(&resume::kind(&cfg.agents[i].cmd)).and_then(|u| u.blocked_until(cfg.limit_percent, now));
+    order.iter().copied().find(|&i| blocked(i).is_none()).or_else(|| order.iter().copied().min_by_key(|&i| blocked(i).unwrap_or(0)))
+}
+
 /// そのエージェントの利用枠（分かれば）
 pub fn of<'a>(usages: &'a Usages, agent: &Agent) -> Option<&'a Usage> {
     usages.get(&resume::kind(&agent.cmd))

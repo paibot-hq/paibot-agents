@@ -170,6 +170,8 @@ enum Action {
     ResumeAll,
     Forget(usize),
     Child(String),
+    /// 途中までの作業を別のエージェントで続ける
+    Handoff(usize),
 }
 
 pub struct PaibotAgentsApp {
@@ -216,6 +218,8 @@ pub struct PaibotAgentsApp {
     adopted_at: Instant,
     /// エージェントごとの利用枠（新しいセッションのエージェント選びに使う）
     usage: crate::usage::Monitor,
+    /// 起動してから貼り付ける最初の入力（起動時に渡せないエージェント用）: (セッション番号, 貼る時刻, 文)
+    pending_paste: Vec<(u64, Instant, String)>,
 }
 
 impl PaibotAgentsApp {
@@ -280,6 +284,7 @@ impl PaibotAgentsApp {
             closed: HashSet::new(),
             adopted_at: Instant::now(),
             usage: crate::usage::Monitor::spawn(cfg_agents, wake_usage),
+            pending_paste: Vec::new(),
         };
         // デーモンで動いているセッションにつなぎ直す。
         // 確認用に画面を撮るときは、撮り終えたら止める（設定フォルダを分けたときだけ、つなぎ直しも試す）
@@ -494,7 +499,7 @@ impl PaibotAgentsApp {
             let roots: Vec<PathBuf> = roots.iter().filter_map(|r| std::fs::canonicalize(r).ok()).filter(|r| r.is_dir()).collect();
             let Some(first) = roots.first().cloned() else { bail!("{}", lf!("ワークスペースのフォルダが見つかりません", "None of the workspace folders were found")) };
             let name = name.unwrap_or_else(|| first.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
-            return self.spawn(name, &agent, first, None, roots);
+            return self.spawn(name, &agent, first, None, roots, None);
         }
         let dir = expand(dir);
         if !dir.is_dir() {
@@ -513,11 +518,12 @@ impl PaibotAgentsApp {
         self.recent.insert(0, d);
         self.recent.truncate(8);
         config::save_recent(&self.recent);
-        self.spawn(name, &agent, cwd, None, Vec::new())
+        self.spawn(name, &agent, cwd, None, Vec::new(), None)
     }
 
     /// エージェントを起動して一覧に加える。saved があればその続きから
-    fn spawn(&mut self, name: String, agent: &Agent, cwd: PathBuf, saved: Option<&Saved>, roots: Vec<PathBuf>) -> Result<()> {
+    /// prompt があれば、それを最初の入力にして始める
+    fn spawn(&mut self, name: String, agent: &Agent, cwd: PathBuf, saved: Option<&Saved>, roots: Vec<PathBuf>, prompt: Option<String>) -> Result<()> {
         let base = agent.cmd.clone();
         let resumed = saved
             .filter(|s| s.resumable())
@@ -530,11 +536,22 @@ impl PaibotAgentsApp {
                 cmd.push_str(&extra);
             }
         }
+        let mut paste_later = None;
+        if let Some(p) = prompt {
+            match crate::handoff::with_prompt(&cmd, &p) {
+                Some(c) => cmd = c,
+                None => paste_later = Some(p),
+            }
+        }
         let run = Agent { name: agent.name.clone(), cmd };
         let mut s = Session::spawn(name, &run, cwd.clone(), self.term.size, self.cfg.scrollback, self.wake.clone())?;
         s.base_cmd = base;
         s.resume_id = id;
         s.roots = roots;
+        if let Some(p) = paste_later {
+            // 起動してすぐは入力を受け付けないことがあるので、少し待ってから貼る
+            self.pending_paste.push((s.id, Instant::now() + Duration::from_secs(5), p));
+        }
         self.sessions.push(s);
         self.sel = self.sessions.len() - 1;
         self.term.reset();
@@ -555,6 +572,27 @@ impl PaibotAgentsApp {
         Ok(())
     }
 
+    /// 途中までの作業を、別のエージェントの新しいセッションで続ける（元のセッションはそのまま残す）
+    fn handoff(&mut self, i: usize) {
+        // codex の会話の ID はあとから探すので、先に覚え直す
+        self.persist();
+        let Some(s) = self.sessions.get(i) else { return };
+        let text = match crate::handoff::from_session(&s.agent, &s.base_cmd, &s.cwd, s.resume_id.as_deref()) {
+            Ok(t) => t,
+            Err(e) => return self.flash(format!("{e:#}")),
+        };
+        let usages = self.usage.get();
+        let Some(ai) = crate::usage::choose_other(&self.cfg, &usages, resume::kind(&s.base_cmd)) else {
+            return self.flash(l!("引き継げる別のエージェントが設定にありません", "No other agent to hand off to in the settings"));
+        };
+        let agent = self.cfg.agents[ai].clone();
+        let (name, cwd, roots, from) = (s.name.clone(), s.cwd.clone(), s.roots.clone(), s.agent.clone());
+        match self.spawn(name, &agent, cwd, None, roots, Some(text)) {
+            Ok(()) => self.flash(lf!("{from} の続きを {} で始めました", "Continuing {from}'s work with {}", agent.name)),
+            Err(e) => self.flash(format!("{e:#}")),
+        }
+    }
+
     fn resume_dormant(&mut self, i: usize) {
         if i >= self.dormant.len() {
             return;
@@ -567,7 +605,7 @@ impl PaibotAgentsApp {
             .find(|a| a.name == saved.agent)
             .cloned()
             .unwrap_or_else(|| Agent { name: saved.agent.clone(), cmd: saved.cmd.clone() });
-        if let Err(e) = self.spawn(saved.name.clone(), &agent, saved.cwd.clone(), Some(&saved), saved.roots.clone()) {
+        if let Err(e) = self.spawn(saved.name.clone(), &agent, saved.cwd.clone(), Some(&saved), saved.roots.clone(), None) {
             self.flash(lf!("{} を再開できませんでした: {e:#}", "Could not resume {}: {e:#}", saved.name));
             self.dormant.insert(i, saved);
         }
@@ -687,6 +725,7 @@ impl PaibotAgentsApp {
                     }
                 }
             }
+            Action::Handoff(i) => self.handoff(i),
             Action::Child(id) => {
                 if self.side == Some(Side::Child) && self.child_view.as_ref().is_some_and(|v| v.id == id) {
                     self.side = None;
@@ -739,6 +778,17 @@ impl PaibotAgentsApp {
                 .filter(|s| resume::kind(&s.base_cmd) == resume::Kind::Claude)
                 .filter_map(|s| s.resume_id.clone().map(|id| (id, s.cwd.clone())))
                 .collect();
+        }
+        if !self.pending_paste.is_empty() {
+            let now = Instant::now();
+            let (due, wait): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_paste).into_iter().partition(|(_, at, _)| *at <= now);
+            self.pending_paste = wait;
+            for (id, _, text) in due {
+                if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
+                    s.paste(&text);
+                    s.write(b"\r");
+                }
+            }
         }
         if self.adopts() && self.adopted_at.elapsed() > Duration::from_secs(3) {
             self.adopt();
@@ -1088,6 +1138,10 @@ impl PaibotAgentsApp {
                     }
                     if item(ui, ui::icon::FOLDER_OPEN, l!("Finder で開く", "Show in Finder")) {
                         acts.push(Action::Finder(i));
+                        ui.close();
+                    }
+                    if resume::kind(&s.base_cmd) != resume::Kind::Other && item(ui, ui::icon::ARROW_BEND_UP_RIGHT, l!("別のエージェントで続ける", "Continue with another agent")) {
+                        acts.push(Action::Handoff(i));
                         ui.close();
                     }
                     ui.separator();
