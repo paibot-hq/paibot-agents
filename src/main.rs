@@ -56,6 +56,7 @@ From a terminal:
   paibot-agents new [-d] [-a AGENT] [DIR]  start a session (-d: don't attach)
   paibot-agents kill NUMBER | NAME         stop a session
   paibot-agents notes [DIR]                show the agents' shared notes
+  paibot-agents notes agy on | off         register the shared notes with agy (agy mcp add)
   paibot-agents daemon stop                stop the daemon and every session
 
 Settings: ~/.config/paibot-agents/config.toml"
@@ -77,6 +78,7 @@ paibot-agents — コーディングエージェントを並べて動かすデ�
   paibot-agents new [-d] [-a エージェント] [フォルダ]  始める（-d: つながずに裏で）
   paibot-agents kill 番号 | 名前               止める
   paibot-agents notes [フォルダ]               エージェントの共有メモを見る
+  paibot-agents notes agy on | off             agy にも共有メモを登録する（agy mcp add）
   paibot-agents daemon stop                    デーモンと全セッションを止める
 
 設定は ~/.config/paibot-agents/config.toml"

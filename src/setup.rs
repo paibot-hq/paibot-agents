@@ -39,6 +39,10 @@ pub struct Setup {
     base: Config,
     detected: Arc<Mutex<Option<Detected>>>,
     applied_detection: bool,
+    shared_notes: bool,
+    /// agy に共有メモが登録されているか（調べ終わるまで None の None）
+    agy_notes: Arc<Mutex<Option<Option<bool>>>>,
+    agy_msg: Option<String>,
 }
 
 pub enum Outcome {
@@ -66,6 +70,18 @@ impl Setup {
                 ctx.request_repaint();
             });
         }
+        // agy に共有メモが登録されているか（agy を使っているときだけ調べる）
+        let agy_notes = Arc::new(Mutex::new(None));
+        if cfg.agents.iter().any(|a| a.cmd.split_whitespace().next().is_some_and(|c| c.rsplit('/').next() == Some("agy"))) {
+            let st = agy_notes.clone();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                *st.lock().unwrap() = Some(crate::shared::agy_registered());
+                ctx.request_repaint();
+            });
+        } else {
+            *agy_notes.lock().unwrap() = Some(None);
+        }
         Self {
             first_run,
             roots,
@@ -84,6 +100,9 @@ impl Setup {
             base: cfg.clone(),
             detected,
             applied_detection: false,
+            shared_notes: cfg.shared_notes,
+            agy_notes,
+            agy_msg: None,
         }
     }
 
@@ -296,6 +315,45 @@ impl Setup {
                 });
 
                 ui.add_space(18.0);
+                section(ui, l!("共有メモ", "Shared notes"), l!("同じリポジトリで動くエージェント同士が、何をしているか・決めたこと・残りの作業を読み書きできるメモ（MCP）。", "Notes (MCP) that agents in the same repository read and write: what they are doing, decisions, work left."));
+                // 確認用: 画面撮りでこの節を見せる
+                if std::env::var("PAIBOT_AGENTS_SHOT_UI").as_deref() == Ok("setup-notes") {
+                    ui.scroll_to_cursor(Some(egui::Align::Center));
+                }
+                ui.checkbox(&mut self.shared_notes, l!("claude と codex のセッションに組み込む（そのセッションだけ。設定ファイルは触らない）", "Add to claude and codex sessions (for that session only; settings files are not touched)"));
+                if self.rows.iter().any(|r| r.on && r.agent.cmd.split_whitespace().next().is_some_and(|c| c.rsplit('/').next() == Some("agy"))) {
+                    ui.horizontal_wrapped(|ui| {
+                        let state = *self.agy_notes.lock().unwrap();
+                        ui.label(RichText::new(l!("agy は起動のときだけ足せないので、agy の設定に登録します:", "agy can't take it per session, so it is registered in agy's settings:")).size(12.5).color(MUTED));
+                        match state {
+                            None => {
+                                ui.label(RichText::new(l!("調べています…", "Checking…")).size(12.0).color(FAINT));
+                            }
+                            Some(None) => {
+                                ui.label(RichText::new(l!("agy を動かせませんでした", "Could not run agy")).size(12.0).color(FAINT));
+                            }
+                            Some(Some(on)) => {
+                                let (label, ok) = if on { (l!("agy から外す", "Remove from agy"), l!("登録済み", "registered")) } else { (l!("agy にも入れる", "Add to agy"), l!("未登録", "not registered")) };
+                                ui.label(RichText::new(ok).size(12.0).color(if on { OK } else { FAINT }));
+                                if ui.button(label).clicked() {
+                                    let res = if on { crate::shared::agy_uninstall() } else { crate::shared::agy_install() };
+                                    self.agy_msg = Some(match res {
+                                        Ok(()) => {
+                                            *self.agy_notes.lock().unwrap() = Some(Some(!on));
+                                            if on { l!("外しました（agy mcp list で確かめられます）", "Removed (check with agy mcp list)").to_string() } else { l!("登録しました（agy mcp list で確かめられます）", "Registered (check with agy mcp list)").to_string() }
+                                        }
+                                        Err(e) => format!("{e:#}"),
+                                    });
+                                }
+                            }
+                        }
+                    });
+                    if let Some(m) = &self.agy_msg {
+                        ui.label(RichText::new(m).size(12.0).color(FAINT));
+                    }
+                }
+
+                ui.add_space(18.0);
                 section(ui, l!("そのほか", "Other"), "");
                 ui.checkbox(&mut self.notify, l!("エージェントの手が空いたら通知する", "Notify me when an agent is waiting"));
                 ui.horizontal(|ui| {
@@ -349,6 +407,7 @@ impl Setup {
         c.language = self.language.clone();
         c.vscode_recent = self.vscode_recent;
         c.font_size = self.font_size;
+        c.shared_notes = self.shared_notes;
         c
     }
 }

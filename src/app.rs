@@ -306,7 +306,7 @@ impl PaibotAgentsApp {
         }
         // 初めて起動したときは設定から
         let shot_ui = app.shot.as_ref().map(|s| s.ui.clone()).unwrap_or_default();
-        if (!config::exists() && app.shot.is_none()) || shot_ui == "setup" {
+        if (!config::exists() && app.shot.is_none()) || shot_ui.starts_with("setup") {
             app.setup = Some(Setup::new(&app.cfg, !config::exists(), &dir, &cc.egui_ctx));
         }
         if let Some(name) = start {

@@ -20,7 +20,19 @@ pub fn run(cmd: &str, args: &[String]) -> Result<()> {
         "attach" | "a" => attach(args.first().map(String::as_str)),
         "new" => new(args),
         "kill" => kill(args.first().map(String::as_str)),
-        "notes" => notes(args.first().map(String::as_str)),
+        "notes" => match (args.first().map(String::as_str), args.get(1).map(String::as_str)) {
+            (Some("agy"), Some("on")) => {
+                crate::shared::agy_install()?;
+                println!("{}", l!("agy に共有メモ（paibot）を登録しました。agy mcp list で見えます", "Registered the shared notes (paibot) with agy; see agy mcp list"));
+                Ok(())
+            }
+            (Some("agy"), Some("off")) => {
+                crate::shared::agy_uninstall()?;
+                println!("{}", l!("agy から共有メモを外しました", "Removed the shared notes from agy"));
+                Ok(())
+            }
+            (dir, _) => notes(dir),
+        },
         "daemon" => match args.first().map(String::as_str) {
             None => daemon::serve(&daemon::sock_path(), Some(Duration::from_secs(30))),
             Some("stop") => {

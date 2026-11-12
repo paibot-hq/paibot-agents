@@ -100,6 +100,8 @@ paibot-agents -a claude                    # 起動と同時に claude を1つ�
 
 組み込みは claude は `--mcp-config`、codex は `-c mcp_servers.paibot…` で、そのセッションだけです。MCP の設定ファイルは書き換えません。claude にはこの2つの道具を確認なしで使うことを許可します。`shared_notes = false` で止められます。
 
+agy にはセッションだけ MCP サーバーを足す方法がないので、選んだときだけ入れます。設定画面の「agy にも入れる」（または `paibot-agents notes agy on`）で `agy mcp add paibot …` を1回実行します。`agy mcp list` に出るようになり、「agy から外す」（または `paibot-agents notes agy off`）で消せます。
+
 ### 画面を閉じても止まらない
 
 エージェントは裏の小さなデーモンの中で動くので、画面を閉じても（落ちても）止まりません。開き直せば、遡れる行も含めてそのまま続きが見られます。デーモンは自動で起動し、最後のエージェントが終わって30秒ほどすると自分で終わります。
@@ -112,6 +114,7 @@ paibot-agents attach 3                    # このターミナルでつなぐ（
 paibot-agents new -a claude ~/work/shop   # ここで始める（-d を付けると裏で始めるだけ）
 paibot-agents kill 3                      # 止める
 paibot-agents notes                       # このリポジトリの共有メモを見る
+paibot-agents notes agy on                # agy にも共有メモを登録する（off で外す）
 paibot-agents daemon stop                 # デーモンと全セッションを止める
 ```
 

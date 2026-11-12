@@ -215,7 +215,8 @@ impl Server {
 pub fn serve(args: &[String]) -> Result<()> {
     let mut project = None;
     let mut agent = "agent".to_string();
-    let mut session = String::new();
+    // Paibot Agents から起動したセッションなら、その名前が環境変数で来る（agy は引数を変えられないので）
+    let mut session = std::env::var("PAIBOT_AGENTS_SESSION").unwrap_or_default();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -237,6 +238,41 @@ pub fn serve(args: &[String]) -> Result<()> {
             out.flush()?;
         }
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- agy への登録
+//
+// agy は起動のときだけ MCP サーバーを足す方法がないので、ユーザーが選んだときだけ
+// agy の設定に `paibot` を登録する（agy mcp add / remove。agy mcp list で見える）
+
+/// agy のコマンドを、.zshrc の PATH が効く対話シェル経由で実行する
+fn agy(args: &[&str]) -> Result<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let line = std::iter::once("agy".to_string()).chain(args.iter().map(|a| shq(a))).collect::<Vec<_>>().join(" ");
+    let o = std::process::Command::new(shell).args(["-l", "-i", "-c", &line]).stdin(std::process::Stdio::null()).output()?;
+    let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    if !o.status.success() {
+        anyhow::bail!("{}", text.trim());
+    }
+    Ok(text)
+}
+
+/// agy に共有メモが登録されているか（agy が動かなければ None）
+pub fn agy_registered() -> Option<bool> {
+    let out = agy(&["mcp", "list"]).ok()?;
+    Some(out.lines().any(|l| l.split_whitespace().next() == Some(SERVER)))
+}
+
+/// agy に共有メモを登録する（もうあれば今のバイナリの場所で入れ直す）
+pub fn agy_install() -> Result<()> {
+    let exe = std::env::current_exe()?.to_string_lossy().into_owned();
+    agy(&["mcp", "add", SERVER, &exe, "mcp", "--agent", "agy"])?;
+    Ok(())
+}
+
+pub fn agy_uninstall() -> Result<()> {
+    agy(&["mcp", "remove", SERVER])?;
     Ok(())
 }
 
