@@ -100,6 +100,12 @@ You don't choose an agent for a new session. Paibot Agents walks `priority` and 
 - **claude**: claude only reports its limits to its status line, so sessions started here get `--settings` with a status line that records them and then runs your own status line command, so what you see does not change. Your settings files are not modified. Turn this off with `track_usage = false`.
 - Other agents: unknown, so only `priority` counts.
 
+### Shared notes between agents
+
+claude and codex sessions started here get a small MCP server, `paibot`, with two tools: `notes_read` and `notes_write`. Every agent working in the same repository (worktrees included), at the same time or later, reads and writes the same notes: what it is doing, decisions, finished steps and unfinished work. A hand-off is saved there too. The notes live in `~/.config/paibot-agents/shared.db`; read them with `paibot-agents notes [DIR]`.
+
+It is added with `--mcp-config` (claude) and `-c mcp_servers.paibot…` (codex) for that session only; your MCP settings are not modified. claude is allowed to call these two tools without asking. Turn it off with `shared_notes = false`.
+
 ### Sessions outlive the window
 
 Agents run inside a small background daemon, so closing the window (or a crash) does not stop them. Open Paibot Agents again and the sessions are there, scrollback included. The daemon starts on its own and exits about 30 seconds after the last agent ends.
@@ -111,6 +117,7 @@ paibot-agents ls                          # list sessions
 paibot-agents attach 3                    # attach in this terminal (number or name); Ctrl+\ detaches
 paibot-agents new -a claude ~/work/shop   # start one here (-d to leave it in the background)
 paibot-agents kill 3                      # stop one
+paibot-agents notes                       # show the shared notes for this repository
 paibot-agents daemon stop                 # stop the daemon and every session
 ```
 
@@ -172,6 +179,7 @@ default_agent = "claude"
 priority = ["claude", "codex"] # order to try for new sessions (empty: default_agent, then agents)
 limit_percent = 90.0          # skip an agent once its 5-hour or weekly limit is this used
 track_usage = true            # read claude's limits through a per-session status line
+shared_notes = true           # give agents shared notes (MCP) per repository
 editor_app = "Visual Studio Code"
 notify = true
 font_size = 13.0

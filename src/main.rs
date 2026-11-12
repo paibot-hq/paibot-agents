@@ -22,6 +22,7 @@ mod runner;
 mod search;
 mod session;
 mod setup;
+mod shared;
 mod shot;
 mod term;
 mod theme;
@@ -54,6 +55,7 @@ From a terminal:
   paibot-agents attach [NUMBER | NAME]     attach in this terminal (Ctrl+\\ detaches)
   paibot-agents new [-d] [-a AGENT] [DIR]  start a session (-d: don't attach)
   paibot-agents kill NUMBER | NAME         stop a session
+  paibot-agents notes [DIR]                show the agents' shared notes
   paibot-agents daemon stop                stop the daemon and every session
 
 Settings: ~/.config/paibot-agents/config.toml"
@@ -74,6 +76,7 @@ paibot-agents — コーディングエージェントを並べて動かすデ�
   paibot-agents attach [番号 | 名前]           このターミナルでつなぐ（Ctrl+\\ で切り離す）
   paibot-agents new [-d] [-a エージェント] [フォルダ]  始める（-d: つながずに裏で）
   paibot-agents kill 番号 | 名前               止める
+  paibot-agents notes [フォルダ]               エージェントの共有メモを見る
   paibot-agents daemon stop                    デーモンと全セッションを止める
 
 設定は ~/.config/paibot-agents/config.toml"
@@ -91,8 +94,10 @@ fn main() -> Result<()> {
         Some("runner") => return run_headless(),
         // claude が呼ぶステータス表示（利用枠を書き留める）
         Some("statusline") => return usage::statusline(),
+        // エージェントが呼ぶ共有メモの MCP サーバー
+        Some("mcp") => return shared::serve(&all[1..]),
         // ターミナルから: セッションの一覧・つなぐ・始める・止める、デーモン
-        Some(c @ ("ls" | "attach" | "a" | "new" | "kill" | "daemon")) => return cli::run(c, &all[1..]),
+        Some(c @ ("ls" | "attach" | "a" | "new" | "kill" | "notes" | "daemon")) => return cli::run(c, &all[1..]),
         _ => {}
     }
     let mut dir = None;

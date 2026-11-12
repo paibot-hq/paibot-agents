@@ -32,6 +32,8 @@ pub struct Config {
     /// claude の利用枠を知るために、そのセッションだけのステータス表示を差し込む
     /// （ユーザー自身のステータス表示はそのまま呼んで出す。設定ファイルは書き換えない）
     pub track_usage: bool,
+    /// 同じリポジトリのエージェント同士で共有メモ（MCP）を読み書きさせる
+    pub shared_notes: bool,
     /// 画面の言語: "auto"（macOS の設定に合わせる）/ "ja" / "en"
     pub language: String,
     /// 「エディタで開く」に使うアプリ
@@ -82,6 +84,7 @@ impl Default for Config {
             priority: Vec::new(),
             limit_percent: 90.0,
             track_usage: true,
+            shared_notes: true,
             language: "auto".into(),
             editor_app: "Visual Studio Code".into(),
             notify: true,

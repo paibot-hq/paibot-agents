@@ -94,6 +94,12 @@ paibot-agents -a claude                    # 起動と同時に claude を1つ�
 - **claude**: 利用枠をステータス表示にしか渡さないので、ここで始めるセッションにだけ `--settings` でステータス表示を差し込み、枠を書き留めてから、あなた自身のステータス表示のコマンドを呼んでそのまま出します。見た目は変わらず、設定ファイルも書き換えません。`track_usage = false` で止められます。
 - そのほかのエージェント: 枠が分からないので、`priority` の順番だけで選びます。
 
+### エージェント同士の共有メモ
+
+ここで始める claude と codex のセッションには、`notes_read` と `notes_write` の2つの道具を持つ小さな MCP サーバー（`paibot`）を組み込みます。同じリポジトリ（worktree も含む）で動くエージェントは、同時でもあとからでも、同じメモを読み書きします。何をしているか、決めたこと、終わったこと、残っている作業などです。引き継いだときの経緯もここに残ります。メモは `~/.config/paibot-agents/shared.db` にあり、`paibot-agents notes [フォルダ]` で見られます。
+
+組み込みは claude は `--mcp-config`、codex は `-c mcp_servers.paibot…` で、そのセッションだけです。MCP の設定ファイルは書き換えません。claude にはこの2つの道具を確認なしで使うことを許可します。`shared_notes = false` で止められます。
+
 ### 画面を閉じても止まらない
 
 エージェントは裏の小さなデーモンの中で動くので、画面を閉じても（落ちても）止まりません。開き直せば、遡れる行も含めてそのまま続きが見られます。デーモンは自動で起動し、最後のエージェントが終わって30秒ほどすると自分で終わります。
@@ -105,6 +111,7 @@ paibot-agents ls                          # セッションの一覧
 paibot-agents attach 3                    # このターミナルでつなぐ（番号か名前）。Ctrl+\ で切り離す
 paibot-agents new -a claude ~/work/shop   # ここで始める（-d を付けると裏で始めるだけ）
 paibot-agents kill 3                      # 止める
+paibot-agents notes                       # このリポジトリの共有メモを見る
 paibot-agents daemon stop                 # デーモンと全セッションを止める
 ```
 
@@ -166,6 +173,7 @@ default_agent = "claude"
 priority = ["claude", "codex"] # 新しいセッションで試す順番（空なら default_agent、そのあとは agents の順）
 limit_percent = 90.0          # 5時間・1週間の利用枠をここまで使ったエージェントは飛ばす
 track_usage = true            # claude の利用枠を、セッションごとのステータス表示で読む
+shared_notes = true           # リポジトリごとの共有メモ（MCP）をエージェントに渡す
 editor_app = "Visual Studio Code"
 notify = true
 font_size = 13.0

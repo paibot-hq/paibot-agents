@@ -315,14 +315,14 @@ fn user_statusline(cwd: &Path) -> Option<Value> {
     None
 }
 
-/// claude を起動するコマンドに足す引数（利用枠を書き留めるステータス表示を、そのセッションだけ差し込む）
-pub fn claude_probe_args(cwd: &Path) -> Option<String> {
+/// claude にそのセッションだけ差し込むステータス表示（利用枠を書き留める）
+pub fn claude_statusline(cwd: &Path) -> Option<Value> {
     let exe = std::env::current_exe().ok()?;
     // ユーザーの設定の padding などは引き継ぎ、コマンドだけ差し替える
     let mut sl = user_statusline(cwd).filter(|v| v.is_object()).unwrap_or_else(|| json!({}));
     sl["type"] = json!("command");
     sl["command"] = json!(format!("{} statusline", shq(&exe.to_string_lossy())));
-    Some(format!(" --settings {}", shq(&json!({ "statusLine": sl }).to_string())))
+    Some(sl)
 }
 
 /// claude が呼ぶステータス表示（paibot-agents statusline）。
@@ -412,10 +412,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pa-usage-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(".claude")).unwrap();
         std::fs::write(dir.join(".claude/settings.json"), r#"{"statusLine":{"type":"command","command":"echo hi","padding":2}}"#).unwrap();
-        let args = claude_probe_args(&dir).unwrap();
-        assert!(args.starts_with(" --settings '"), "{args}");
-        assert!(args.contains(r#""padding":2"#), "{args}");
-        assert!(args.contains(" statusline"), "{args}");
+        let sl = claude_statusline(&dir).unwrap();
+        assert_eq!(sl["padding"], 2);
+        assert!(sl["command"].as_str().unwrap().ends_with(" statusline"), "{sl}");
         assert_eq!(user_statusline(&dir).unwrap()["command"], "echo hi");
         let _ = std::fs::remove_dir_all(&dir);
     }
