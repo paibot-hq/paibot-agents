@@ -112,6 +112,18 @@ pub fn of<'a>(usages: &'a Usages, agent: &Agent) -> Option<&'a Usage> {
     usages.get(&resume::kind(&agent.cmd))
 }
 
+/// エージェントを起動するコマンドに足す引数。claude には、利用枠を書き留めるステータス表示を
+/// そのセッションだけ差し込む（設定ファイルは書き換えない）
+pub fn launch_args(cfg: &Config, kind: Kind, cwd: &Path) -> String {
+    if kind != Kind::Claude || !cfg.track_usage {
+        return String::new();
+    }
+    match claude_statusline(cwd) {
+        Some(sl) => format!(" --settings {}", resume::quote(Path::new(&json!({"statusLine": sl}).to_string()))),
+        None => String::new(),
+    }
+}
+
 // ---------------------------------------------------------------- 読む
 
 /// 入っているエージェントの利用枠をまとめて読む（codex は数秒かかることがある）

@@ -20,19 +20,6 @@ pub fn run(cmd: &str, args: &[String]) -> Result<()> {
         "attach" | "a" => attach(args.first().map(String::as_str)),
         "new" => new(args),
         "kill" => kill(args.first().map(String::as_str)),
-        "notes" => match (args.first().map(String::as_str), args.get(1).map(String::as_str)) {
-            (Some("agy"), Some("on")) => {
-                crate::shared::agy_install()?;
-                println!("{}", l!("agy に共有メモ（paibot）を登録しました。agy mcp list で見えます", "Registered the shared notes (paibot) with agy; see agy mcp list"));
-                Ok(())
-            }
-            (Some("agy"), Some("off")) => {
-                crate::shared::agy_uninstall()?;
-                println!("{}", l!("agy から共有メモを外しました", "Removed the shared notes from agy"));
-                Ok(())
-            }
-            (dir, _) => notes(dir),
-        },
         "daemon" => match args.first().map(String::as_str) {
             None => daemon::serve(&daemon::sock_path(), Some(Duration::from_secs(30))),
             Some("stop") => {
@@ -104,18 +91,6 @@ fn choose(key: Option<&str>) -> Result<Info> {
     }
 }
 
-/// 共有メモを見る（paibot-agents notes [フォルダ]）
-fn notes(dir: Option<&str>) -> Result<()> {
-    let cwd = std::fs::canonicalize(dir.map(PathBuf::from).unwrap_or(std::env::current_dir()?))?;
-    let list = crate::shared::read(&crate::shared::project_key(&cwd), 50)?;
-    if list.is_empty() {
-        println!("{}", l!("このプロジェクトの共有メモはまだありません", "No shared notes for this project yet"));
-    } else {
-        println!("{}", crate::shared::format(&list));
-    }
-    Ok(())
-}
-
 fn kill(key: Option<&str>) -> Result<()> {
     let Some(key) = key else { bail!("{}", l!("止めるセッションの番号か名前が要ります", "Give the number or name of the session to stop")) };
     let list = list_or_empty();
@@ -160,7 +135,7 @@ fn new(args: &[String]) -> Result<()> {
     }
     let name = cwd.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "/".into());
     let (mut cmd, resume_id) = crate::resume::start_cmd(&agent.cmd);
-    cmd.push_str(&crate::shared::launch_args(&cfg, crate::resume::kind(&agent.cmd), &cwd, &agent.name, &name));
+    cmd.push_str(&crate::usage::launch_args(&cfg, crate::resume::kind(&agent.cmd), &cwd));
     let (rows, cols) = term_size().unwrap_or((40, 120));
     let meta = serde_json::json!({ "base_cmd": agent.cmd, "resume_id": resume_id, "roots": [] });
     let mut s = daemon::connect()?;

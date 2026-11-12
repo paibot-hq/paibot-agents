@@ -146,8 +146,8 @@ pub fn build(from: &str, cwd: &Path, steps: &[Step]) -> String {
         out.push_str("\n\n");
     }
     out.push_str(l!(
-        "共有メモ（notes_read）が使えるなら、ほかのエージェントが残したメモも読んでください。まず git の状態と上のファイルを見て、どこまで終わっているかを確かめてから、残りの作業を続けてください。終わっていることはやり直さないでください。分からないことがあれば聞いてください。",
-        "If shared notes (notes_read) are available, read what other agents left there too. First check git and the files above to see how far the work got, then carry on with what is left. Don't redo finished work. Ask if anything is unclear."
+        "まず git の状態と上のファイルを見て、どこまで終わっているかを確かめてから、残りの作業を続けてください。終わっていることはやり直さないでください。分からないことがあれば聞いてください。",
+        "First check git and the files above to see how far the work got, then carry on with what is left. Don't redo finished work. Ask if anything is unclear."
     ));
     out
 }

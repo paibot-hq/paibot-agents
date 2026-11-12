@@ -585,8 +585,8 @@ impl PaibotAgentsApp {
             .and_then(|s| s.resume_id.as_deref().and_then(|id| resume::resume_cmd(&base, id).map(|c| (c, Some(id.to_string())))));
         let (cmd, id) = resumed.unwrap_or_else(|| resume::start_cmd(&base));
         let mut cmd = if roots.len() > 1 { resume::add_dirs(&cmd, &roots[1..]) } else { cmd };
-        // そのセッションだけ: claude の利用枠を知るステータス表示と、エージェント同士の共有メモ
-        cmd.push_str(&crate::shared::launch_args(&self.cfg, resume::kind(&base), &cwd, &agent.name, &name));
+        // そのセッションだけ: claude の利用枠を知るステータス表示
+        cmd.push_str(&crate::usage::launch_args(&self.cfg, resume::kind(&base), &cwd));
         let mut paste_later = None;
         if let Some(p) = prompt {
             match crate::handoff::with_prompt(&cmd, &p) {
@@ -638,10 +638,6 @@ impl PaibotAgentsApp {
         };
         let agent = self.cfg.agents[ai].clone();
         let (name, cwd, roots, from) = (s.name.clone(), s.cwd.clone(), s.roots.clone(), s.agent.clone());
-        // 共有メモにも残す（引き継いだ側も、あとから来たエージェントも読める）
-        if self.cfg.shared_notes {
-            let _ = crate::shared::write(&crate::shared::project_key(&cwd), &from, &name, "handoff", &text);
-        }
         match self.spawn(name, &agent, cwd, None, roots, Some(text)) {
             Ok(()) => self.flash(lf!("{from} の続きを {} で始めました", "Continuing {from}'s work with {}", agent.name)),
             Err(e) => self.flash(format!("{e:#}")),
