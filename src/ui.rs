@@ -38,11 +38,6 @@ pub fn icon_button_colored(ui: &mut Ui, glyph: &str, tip: &str, active: bool, ti
     resp.on_hover_text(tip)
 }
 
-/// 小さな見出し（「セッション」など）
-pub fn section(ui: &mut Ui, text: &str) {
-    ui.label(egui::RichText::new(text).size(11.0).color(FAINT));
-}
-
 /// セッションの状態を小さな印で描く
 pub fn status_dot(ui: &mut Ui, s: &Session) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());

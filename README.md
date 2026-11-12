@@ -46,6 +46,7 @@ Agents now call other agents. Claude shells out to `codex exec`, spawns `Explore
 | 🔀 **Cross-vendor** | Claude Code, Codex and Antigravity (`agy`) in one tree, including Claude subagents and agy's own subagents. |
 | 🧷 **Honest edges** | A solid line means the link is in the logs (or the child's exact prompt appears in the parent's command). A dashed line means it is a guess. |
 | 🙅 **No hooks, read-only** | Paibot Agents never edits your agent settings. It only reads files the agents already write on your machine. Nothing is sent anywhere. |
+| 📋 **A plain list** | One line per session on the left, the conversation on the right. Sessions are named after the first thing you asked; the ones waiting for you move to the top; older ones fold under "Earlier". |
 | ⏯ **Resume** | Quit and come back: sessions reopen where the conversation left off (`claude --resume`, `codex resume`). |
 | 🌿 **Worktrees** | Type a branch name and the agent starts in its own git worktree. |
 | ✍️ **Edit & ask** | Open files in tabs, edit, save. Select lines and press <kbd>⌘L</kbd> to drop “`src/cart.ts` lines 12–20: …” into the agent's input. |
@@ -94,7 +95,7 @@ On first launch a short setup finds the agents you have installed (claude, codex
 
 ### Picking the agent for you
 
-You don't choose an agent for a new session. Paibot Agents walks `priority` and takes the first agent that still has room in its 5-hour and weekly limits; the window shows which one it picked and why ("claude is near its limit · resets in 2h"). Press Tab or "Change" to pick one yourself. The session card shows what is left, e.g. `claude 5h 40% · 1w 12%`.
+You don't choose an agent for a new session. Paibot Agents walks `priority` and takes the first agent that still has room in its 5-hour and weekly limits; the window shows which one it picked and why ("claude is near its limit · resets in 2h"). Press Tab or "Change" to pick one yourself. The agent in use and what is left (`claude 5h 40% · 1w 12%`) show small at the top right of the conversation.
 
 - **codex**: asked through `codex app-server` (reading does not use up your limit), falling back to its session logs.
 - **claude**: claude only reports its limits to its status line, so sessions started here get `--settings` with a status line that records them and then runs your own status line command, so what you see does not change. Your settings files are not modified. Turn this off with `track_usage = false`.
@@ -124,7 +125,7 @@ paibot-agents notes agy on                # register the shared notes with agy (
 paibot-agents daemon stop                 # stop the daemon and every session
 ```
 
-A session started in the terminal shows up in the window within a few seconds. The daemon does not survive a reboot; after one, "Last time" in the sidebar still resumes claude and codex conversations.
+A session started in the terminal shows up in the window within a few seconds. The daemon does not survive a reboot; after one, "Earlier" at the bottom of the list still resumes claude and codex conversations.
 
 ## Ask from your phone (paibot.app) — coming soon
 

@@ -170,6 +170,29 @@ pub fn from_session(agent_name: &str, base_cmd: &str, cwd: &Path, resume_id: Opt
     Ok(build(agent_name, cwd, &steps))
 }
 
+/// 最初に頼んだことから、一覧に出す短い名前を作る（引き継ぎの文面は飛ばす）
+pub fn title(base_cmd: &str, cwd: &Path, resume_id: &str) -> Option<String> {
+    let kind = resume::kind(base_cmd);
+    let file = transcript(kind, cwd, resume_id)?;
+    let ck = match kind {
+        Kind::Claude => children::Kind::Claude,
+        Kind::Codex => children::Kind::Codex,
+        Kind::Other => return None,
+    };
+    let (steps, _) = children::read_steps(ck, &file);
+    steps.iter().filter(|s| s.kind == StepKind::Prompt).map(|s| title_of(&s.text)).find(|t| !t.is_empty() && !is_handoff(t))
+}
+
+fn is_handoff(t: &str) -> bool {
+    t.starts_with("これは、別のコーディングエージェント") || t.starts_with("This continues work that another coding agent")
+}
+
+/// 文の最初の行を、一覧に収まる長さにする
+pub fn title_of(text: &str) -> String {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    clip(line, 40)
+}
+
 /// 最初の入力を付けて起動するコマンド。付け方が分からないエージェントは None（あとから貼り付ける）
 pub fn with_prompt(cmd: &str, prompt: &str) -> Option<String> {
     let q = resume::quote(Path::new(prompt));
@@ -217,6 +240,13 @@ mod tests {
         assert!(t.len() < BUDGET + 8000, "{}", t.len());
         assert!(t.contains("手順 1999"), "新しい手順は残る");
         assert!(!t.contains("手順 5 "), "古い手順は省く");
+    }
+
+    #[test]
+    fn titles_come_from_the_first_line() {
+        assert_eq!(title_of("\n  ログイン画面を直して\n詳しくは…"), "ログイン画面を直して");
+        assert_eq!(title_of(&"あ".repeat(50)).chars().count(), 41);
+        assert!(is_handoff(&title_of(&build("claude", Path::new("/nowhere"), &[step(StepKind::Prompt, "x")]))));
     }
 
     #[test]
