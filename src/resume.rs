@@ -16,6 +16,8 @@ use crate::config;
 pub enum Kind {
     Claude,
     Codex,
+    /// Antigravity（会話の再開や引き継ぎの元にはならないが、利用枠は分かる）
+    Agy,
     Other,
 }
 
@@ -25,6 +27,7 @@ pub fn kind(cmd: &str) -> Kind {
     match base {
         "claude" => Kind::Claude,
         "codex" => Kind::Codex,
+        "agy" => Kind::Agy,
         _ => Kind::Other,
     }
 }
@@ -79,7 +82,7 @@ pub fn resume_cmd(cmd: &str, id: &str) -> Option<String> {
     match kind(cmd) {
         Kind::Claude => Some(format!("{cmd} --resume {id}")),
         Kind::Codex => Some(format!("{cmd} resume {id}")),
-        Kind::Other => None,
+        Kind::Agy | Kind::Other => None,
     }
 }
 

@@ -23,7 +23,7 @@ pub fn transcript(kind: Kind, cwd: &Path, id: &str) -> Option<PathBuf> {
             std::fs::read_dir(children::claude_root()).ok()?.flatten().map(|d| d.path().join(format!("{id}.jsonl"))).find(|f| f.is_file())
         }
         Kind::Codex => find_named(&children::codex_root(), id, 3),
-        Kind::Other => None,
+        Kind::Agy | Kind::Other => None,
     }
 }
 
@@ -177,7 +177,7 @@ pub fn title(base_cmd: &str, cwd: &Path, resume_id: &str) -> Option<String> {
     let ck = match kind {
         Kind::Claude => children::Kind::Claude,
         Kind::Codex => children::Kind::Codex,
-        Kind::Other => return None,
+        Kind::Agy | Kind::Other => return None,
     };
     let (steps, _) = children::read_steps(ck, &file);
     steps.iter().filter(|s| s.kind == StepKind::Prompt).map(|s| title_of(&s.text)).find(|t| !t.is_empty() && !is_handoff(t))

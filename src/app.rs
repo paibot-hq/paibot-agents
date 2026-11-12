@@ -1167,7 +1167,10 @@ impl PaibotAgentsApp {
         ui.spacing_mut().item_spacing.y = 3.0;
         let head = ui.add(egui::Button::new(RichText::new(l!("残りの枠", "Usage left")).size(11.0).color(FAINT)).frame(false)).on_hover_text(l!("押すと読み直します", "Click to refresh"));
         ui.add_space(2.0);
-        for (k, name) in kinds {
+        for (n, (k, name)) in kinds.into_iter().enumerate() {
+            if n > 0 {
+                ui.add_space(4.0);
+            }
             let u = usages.get(&k);
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&name).font(ui::bold(12.0)).color(MUTED));
@@ -1231,7 +1234,7 @@ impl PaibotAgentsApp {
         if item(ui, ui::icon::FOLDER_OPEN, l!("Finder で開く", "Show in Finder")) {
             push(ui, Action::Finder(i));
         }
-        if resume::kind(&s.base_cmd) != resume::Kind::Other && item(ui, ui::icon::ARROW_BEND_UP_RIGHT, l!("別のエージェントで続ける", "Continue with another agent")) {
+        if matches!(resume::kind(&s.base_cmd), resume::Kind::Claude | resume::Kind::Codex) && item(ui, ui::icon::ARROW_BEND_UP_RIGHT, l!("別のエージェントで続ける", "Continue with another agent")) {
             push(ui, Action::Handoff(i));
         }
         ui.separator();
@@ -1352,6 +1355,7 @@ impl PaibotAgentsApp {
                 let color = match resume::kind(&s.base_cmd) {
                     resume::Kind::Claude => map::CLAUDE,
                     resume::Kind::Codex => map::CODEX,
+                    resume::Kind::Agy => map::AGY,
                     resume::Kind::Other => map::OTHER,
                 };
                 let start = s.started_at;
