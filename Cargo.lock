@@ -2580,6 +2580,7 @@ dependencies = [
  "eframe",
  "egui-phosphor",
  "egui_extras",
+ "libc",
  "png 0.17.16",
  "portable-pty",
  "rfd",

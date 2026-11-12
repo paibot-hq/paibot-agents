@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -210,6 +210,10 @@ pub struct PaibotAgentsApp {
     /// paibot.app とのつながり（つないでいなければ None）
     runner: Option<Arc<Mutex<crate::runner::Status>>>,
     window_focused: bool,
+    /// 止めたセッション（デーモンの一覧から消えるまでのあいだ、つなぎ直さない）
+    closed: HashSet<u64>,
+    /// 最後にデーモンの一覧を見た時刻
+    adopted_at: Instant,
 }
 
 impl PaibotAgentsApp {
@@ -269,7 +273,17 @@ impl PaibotAgentsApp {
             shot: crate::shot::Shot::from_env(),
             runner: None,
             window_focused: true,
+            closed: HashSet::new(),
+            adopted_at: Instant::now(),
         };
+        // デーモンで動いているセッションにつなぎ直す。
+        // 確認用に画面を撮るときは、撮り終えたら止める（設定フォルダを分けたときだけ、つなぎ直しも試す）
+        if app.shot.is_some() {
+            crate::session::close_on_drop(true);
+        }
+        if app.adopts() {
+            app.adopt();
+        }
         // paibot.app とつないでいれば、裏で仕事を受ける（確認用に画面を撮るときはつながない）
         if !app.cfg.paibot_token.is_empty() && app.shot.is_none() {
             let st = Arc::new(Mutex::new(crate::runner::Status::default()));
@@ -369,12 +383,41 @@ impl PaibotAgentsApp {
         app
     }
 
-    fn flash(&mut self, msg: impl Into<String>) {
-        self.flash = Some((msg.into(), Instant::now()));
+    /// デーモンのセッションにつなぎ直すか（画面撮りでは、設定フォルダを分けたときだけ）
+    fn adopts(&self) -> bool {
+        self.shot.is_none() || std::env::var_os("PAIBOT_AGENTS_CONFIG_DIR").is_some()
     }
 
-    fn alive(&self) -> usize {
-        self.sessions.iter().filter(|s| s.exit.is_none()).count()
+    /// デーモンにあって、まだ一覧にないセッションにつなぐ（ターミナルで始めたものも）
+    fn adopt(&mut self) {
+        self.adopted_at = Instant::now();
+        let Ok(list) = crate::daemon::list() else { return };
+        self.closed.retain(|id| list.iter().any(|i| i.id == *id));
+        let before = self.sessions.len();
+        for info in list {
+            if self.closed.contains(&info.id) || self.sessions.iter().any(|s| s.id == info.id) {
+                continue;
+            }
+            match Session::attach(&info, self.term.size, self.cfg.scrollback, self.wake.clone()) {
+                Ok(s) => {
+                    // 「前回のセッション」に同じものが残っていれば外す
+                    self.dormant.retain(|d| !((d.cwd == s.cwd && d.name == s.name) || (d.resume_id.is_some() && d.resume_id == s.resume_id)));
+                    self.sessions.push(s);
+                }
+                Err(e) => self.flash(lf!("{} につなげませんでした: {e:#}", "Could not attach to {}: {e:#}", info.name)),
+            }
+        }
+        if self.sessions.len() != before {
+            if before == 0 {
+                self.sel = 0;
+                self.term.reset();
+            }
+            self.sync_git_dirs();
+        }
+    }
+
+    fn flash(&mut self, msg: impl Into<String>) {
+        self.flash = Some((msg.into(), Instant::now()));
     }
 
     /// 今のセッションのワークスペース（なければ作る）
@@ -546,6 +589,9 @@ impl PaibotAgentsApp {
             })
             .collect();
         list.extend(self.dormant.iter().cloned());
+        for s in self.sessions.iter_mut() {
+            s.sync_meta();
+        }
         if self.shot.is_none() || std::env::var_os("PAIBOT_AGENTS_CONFIG_DIR").is_some() {
             resume::save(&list);
         }
@@ -561,6 +607,7 @@ impl PaibotAgentsApp {
         if i < self.sessions.len() {
             let mut s = self.sessions.remove(i);
             s.kill();
+            self.closed.insert(s.id);
             if self.sel >= self.sessions.len() {
                 self.sel = self.sessions.len().saturating_sub(1);
             }
@@ -680,6 +727,9 @@ impl PaibotAgentsApp {
                 .filter(|s| resume::kind(&s.base_cmd) == resume::Kind::Claude)
                 .filter_map(|s| s.resume_id.clone().map(|id| (id, s.cwd.clone())))
                 .collect();
+        }
+        if self.adopts() && self.adopted_at.elapsed() > Duration::from_secs(3) {
+            self.adopt();
         }
         let now = Instant::now();
         let idle = Duration::from_secs_f64(self.cfg.idle_secs.max(0.2));
@@ -1497,6 +1547,7 @@ impl PaibotAgentsApp {
                 if let Some(s) = self.sessions.get_mut(i) {
                     if !name.trim().is_empty() {
                         s.name = name.trim().to_string();
+                        s.sync_meta();
                     }
                 }
                 keep = false;
@@ -1519,8 +1570,7 @@ impl PaibotAgentsApp {
                 ),
                 Confirm::Quit => {
                     let dirty = self.dirty_docs();
-                    let extra = if dirty > 0 { lf!("保存していないファイルが {dirty} 個あります（保存されません）。", "{dirty} unsaved files will not be saved. ") } else { String::new() };
-                    (l!("終わる", "Quit").to_string(), lf!("動いているセッションが {} 個あります。{extra}全部止めて終わりますか？\n\n次に開いたとき、サイドバーの「前回のセッション」から再開できます（claude と codex は会話の続きから）。", "{} sessions are running. {extra}Stop them all and quit?\n\nNext time, you can resume them from \"Last time\" in the sidebar (claude and codex continue the conversation).", self.alive()))
+                    (l!("終わる", "Quit").to_string(), lf!("保存していないファイルが {dirty} 個あります。保存せずに終わりますか？\n\nセッションは裏で動き続けます。次に開いたとき、そのまま続きが見られます。", "{dirty} files have unsaved changes. Quit without saving?\n\nSessions keep running in the background; you'll see them again next time."))
                 }
                 Confirm::CloseDoc(cwd, i) => (
                     l!("閉じる", "Close").to_string(),
@@ -1585,7 +1635,7 @@ impl eframe::App for PaibotAgentsApp {
         if ctx.input(|i| i.viewport().close_requested()) {
             self.persist();
         }
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && (self.alive() > 0 || self.dirty_docs() > 0) {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && self.dirty_docs() > 0 {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.confirm = Some(Confirm::Quit);
         }

@@ -92,6 +92,22 @@ paibot-agents -a claude                    # open one claude session right away
 
 On first launch a short setup finds the agents you have installed (claude, codex, gemini, cursor-agent, agy, opencode, …), your projects folder and your editor.
 
+### Sessions outlive the window
+
+Agents run inside a small background daemon, so closing the window (or a crash) does not stop them. Open Paibot Agents again and the sessions are there, scrollback included. The daemon starts on its own and exits about 30 seconds after the last agent ends.
+
+The same sessions can be reached from any terminal:
+
+```sh
+paibot-agents ls                          # list sessions
+paibot-agents attach 3                    # attach in this terminal (number or name); Ctrl+\ detaches
+paibot-agents new -a claude ~/work/shop   # start one here (-d to leave it in the background)
+paibot-agents kill 3                      # stop one
+paibot-agents daemon stop                 # stop the daemon and every session
+```
+
+A session started in the terminal shows up in the window within a few seconds. The daemon does not survive a reboot; after one, "Last time" in the sidebar still resumes claude and codex conversations.
+
 ## Ask from your phone (paibot.app) — coming soon
 
 > [!NOTE]
