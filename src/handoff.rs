@@ -193,13 +193,12 @@ pub fn title_of(text: &str) -> String {
     clip(line, 40)
 }
 
-/// 最初の入力を付けて起動するコマンド。付け方が分からないエージェントは None（あとから貼り付ける）
+/// 最初の入力を付けて起動するコマンド。付け方が分からないエージェントと agy は None（あとから貼り付ける）
 pub fn with_prompt(cmd: &str, prompt: &str) -> Option<String> {
     let q = resume::quote(Path::new(prompt));
     let first = cmd.split_whitespace().next().unwrap_or("");
     match first.rsplit('/').next().unwrap_or(first) {
         "claude" | "codex" => Some(format!("{cmd} {q}")),
-        "agy" => Some(format!("{cmd} -i {q}")),
         _ => None,
     }
 }
@@ -253,7 +252,7 @@ mod tests {
     fn prompt_goes_where_each_agent_expects_it() {
         assert_eq!(with_prompt("claude --session-id x", "it's").unwrap(), "claude --session-id x 'it'\\''s'");
         assert_eq!(with_prompt("/usr/local/bin/codex", "hi").unwrap(), "/usr/local/bin/codex 'hi'");
-        assert_eq!(with_prompt("agy", "hi").unwrap(), "agy -i 'hi'");
+        assert!(with_prompt("agy", "hi").is_none(), "agy には自動で文を渡さない（貼り付けて自分で送る）");
         assert!(with_prompt("gemini", "hi").is_none());
     }
 }

@@ -85,7 +85,7 @@ const CLAUDE_DENY: &str = r#"{"permissions":{"deny":["Read(**/.env*)","Read(**/.
 
 /// Bot を動かすコマンド。write でない Bot は読むだけ:
 /// claude は --restricted（コマンドを実行する道具と自分の設定の許可を外す）で Read/Grep/Glob だけ、MCP なし、秘密のファイルは読めない。
-/// codex は read-only のサンドボックス、agy は計画だけ（plan）でサンドボックス
+/// codex は read-only のサンドボックス。agy は自動で動かすと規約に触れるおそれがあるので Bot にしない
 pub fn command_for(bot: &BotDef) -> Option<String> {
     let extra = bot.args.trim();
     let ro = !bot.write;
@@ -98,7 +98,6 @@ pub fn command_for(bot: &BotDef) -> Option<String> {
             let sandbox = if ro { "read-only" } else { "workspace-write" };
             format!("codex exec --skip-git-repo-check --sandbox {sandbox} -o \"$PAIBOT_OUT\" {extra} \"$PAIBOT_PROMPT\"")
         }
-        "agy" => format!("agy -p \"$PAIBOT_PROMPT\"{} {extra}", if ro { " --mode plan --sandbox" } else { "" }),
         "echo" => "printf 'echo: %s' \"$PAIBOT_PROMPT\"".to_string(),
         _ => return None,
     };
@@ -374,7 +373,8 @@ mod tests {
         let claude = command_for(&bot("claude")).unwrap();
         assert!(claude.contains("--restricted") && claude.contains("--tools Read,Grep,Glob") && claude.contains("Read(**/.env*)"));
         assert!(command_for(&bot("codex")).unwrap().contains("--sandbox read-only"));
-        assert!(command_for(&bot("agy")).unwrap().contains("--mode plan --sandbox"));
+        // agy は外から自動で動かすと規約に触れるおそれがあるので Bot にしない
+        assert!(command_for(&bot("agy")).is_none());
         // write = true にしたときだけ外れる
         let mut w = bot("claude");
         w.write = true;
