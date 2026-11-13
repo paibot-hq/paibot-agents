@@ -3,15 +3,19 @@ mod i18n;
 mod agy;
 mod app;
 mod children;
+mod cli;
 mod config;
+mod daemon;
 mod editor;
 mod files;
 mod git;
+mod handoff;
 mod keys;
 mod map;
 mod notify;
 mod picker;
 mod projects;
+mod pty;
 mod quickopen;
 mod resume;
 mod runner;
@@ -22,6 +26,7 @@ mod shot;
 mod term;
 mod theme;
 mod ui;
+mod usage;
 mod util;
 mod vscode;
 
@@ -42,6 +47,15 @@ Usage: paibot-agents [-a AGENT] [FOLDER | WORKSPACE.code-workspace]
   .code-workspace   open a VSCode workspace and pick from its folders
   -a AGENT          start one session with that agent (claude / codex / shell ...)
 
+Agents keep running in a background daemon after you close the window.
+From a terminal:
+
+  paibot-agents ls                         list sessions
+  paibot-agents attach [NUMBER | NAME]     attach in this terminal (Ctrl+\\ detaches)
+  paibot-agents new [-d] [-a AGENT] [DIR]  start a session (-d: don't attach)
+  paibot-agents kill NUMBER | NAME         stop a session
+  paibot-agents daemon stop                stop the daemon and every session
+
 Settings: ~/.config/paibot-agents/config.toml"
     } else {
         "\
@@ -52,6 +66,15 @@ paibot-agents — コーディングエージェントを並べて動かすデ�
   フォルダ          新しいセッションの最初のフォルダ（省略すると今いる場所）
   .code-workspace   VSCode のワークスペースを開き、そのフォルダから選ぶ
   -a エージェント   起動と同時にそのエージェントを1つ開く（claude / codex / shell など）
+
+エージェントは裏のデーモンで動くので、画面を閉じても止まりません。
+ターミナルからは:
+
+  paibot-agents ls                             セッションの一覧
+  paibot-agents attach [番号 | 名前]           このターミナルでつなぐ（Ctrl+\\ で切り離す）
+  paibot-agents new [-d] [-a エージェント] [フォルダ]  始める（-d: つながずに裏で）
+  paibot-agents kill 番号 | 名前               止める
+  paibot-agents daemon stop                    デーモンと全セッションを止める
 
 設定は ~/.config/paibot-agents/config.toml"
     }
@@ -66,6 +89,11 @@ fn main() -> Result<()> {
     match all.first().map(String::as_str) {
         Some("connect") => return connect(&all[1..]),
         Some("runner") => return run_headless(),
+        // claude が呼ぶステータス表示（利用枠を書き留める）
+        Some("statusline") => return usage::statusline(),
+        // エージェントが呼ぶ共有メモの MCP サーバー
+        // ターミナルから: セッションの一覧・つなぐ・始める・止める、デーモン
+        Some(c @ ("ls" | "attach" | "a" | "new" | "kill" | "daemon")) => return cli::run(c, &all[1..]),
         _ => {}
     }
     let mut dir = None;

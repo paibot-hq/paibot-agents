@@ -46,6 +46,7 @@ Agents now call other agents. Claude shells out to `codex exec`, spawns `Explore
 | 🔀 **Cross-vendor** | Claude Code, Codex and Antigravity (`agy`) in one tree, including Claude subagents and agy's own subagents. |
 | 🧷 **Honest edges** | A solid line means the link is in the logs (or the child's exact prompt appears in the parent's command). A dashed line means it is a guess. |
 | 🙅 **No hooks, read-only** | Paibot Agents never edits your agent settings. It only reads files the agents already write on your machine. Nothing is sent anywhere. |
+| 📋 **A plain list** | One line per session on the left, the conversation on the right. Sessions are named after the first thing you asked; the ones waiting for you move to the top; older ones fold under "Earlier". |
 | ⏯ **Resume** | Quit and come back: sessions reopen where the conversation left off (`claude --resume`, `codex resume`). |
 | 🌿 **Worktrees** | Type a branch name and the agent starts in its own git worktree. |
 | ✍️ **Edit & ask** | Open files in tabs, edit, save. Select lines and press <kbd>⌘L</kbd> to drop “`src/cart.ts` lines 12–20: …” into the agent's input. |
@@ -91,6 +92,30 @@ paibot-agents -a claude                    # open one claude session right away
 ```
 
 On first launch a short setup finds the agents you have installed (claude, codex, gemini, cursor-agent, agy, opencode, …), your projects folder and your editor.
+
+### Picking the agent for you
+
+You don't choose an agent for a new session. Paibot Agents walks `priority` and takes the first agent that still has room in its 5-hour and weekly limits; the window shows which one it picked and why ("claude is near its limit · resets in 2h"). Press Tab or "Change" to pick one yourself. What each agent has left (5-hour and weekly) and when it resets is always shown at the bottom of the list. For agy it runs `agy -p /usage` (no message is sent, so nothing is used up); agy has a limit per model group, and the Gemini group is the one shown.
+
+- **codex**: asked through `codex app-server` (reading does not use up your limit), falling back to its session logs.
+- **claude**: claude only reports its limits to its status line, so sessions started here get `--settings` with a status line that records them and then runs your own status line command, so what you see does not change. Your settings files are not modified. Turn this off with `track_usage = false`.
+- Other agents: unknown, so only `priority` counts.
+
+### Sessions outlive the window
+
+Agents run inside a small background daemon, so closing the window (or a crash) does not stop them. Open Paibot Agents again and the sessions are there, scrollback included. The daemon starts on its own and exits about 30 seconds after the last agent ends.
+
+The same sessions can be reached from any terminal:
+
+```sh
+paibot-agents ls                          # list sessions
+paibot-agents attach 3                    # attach in this terminal (number or name); Ctrl+\ detaches
+paibot-agents new -a claude ~/work/shop   # start one here (-d to leave it in the background)
+paibot-agents kill 3                      # stop one
+paibot-agents daemon stop                 # stop the daemon and every session
+```
+
+A session started in the terminal shows up in the window within a few seconds. The daemon does not survive a reboot; after one, "Earlier" at the bottom of the list still resumes claude and codex conversations.
 
 ## Ask from your phone (paibot.app) — coming soon
 
@@ -145,6 +170,9 @@ projects = []                 # extra individual folders
 workspaces = []               # .code-workspace files to list
 vscode_recent = true          # also list what you recently opened in VSCode / Cursor
 default_agent = "claude"
+priority = ["claude", "codex"] # order to try for new sessions (empty: default_agent, then agents)
+limit_percent = 90.0          # skip an agent once its 5-hour or weekly limit is this used
+track_usage = true            # read claude's limits through a per-session status line
 editor_app = "Visual Studio Code"
 notify = true
 font_size = 13.0

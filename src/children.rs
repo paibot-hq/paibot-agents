@@ -649,6 +649,7 @@ pub fn build_tree(all: &[Child], sessions: &[SessionRef]) -> Vec<Vec<Node>> {
 }
 
 /// ツリーを上から順に並べる（深さつき）
+#[cfg(test)]
 pub fn flatten(nodes: &[Node]) -> Vec<(usize, &Node)> {
     fn go<'a>(n: &'a [Node], d: usize, out: &mut Vec<(usize, &'a Node)>) {
         for x in n {

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use eframe::egui::{self, Align, Frame, Id, Key, Label, Layout, Margin, Modifiers, RichText, ScrollArea, Sense, Stroke, TextEdit, vec2};
 
 use crate::config::Config;
+use crate::usage::{self, Usages};
 use crate::projects::{self, Project};
 use crate::theme::*;
 use crate::util::{expand, tilde};
@@ -12,6 +13,8 @@ use crate::util::{expand, tilde};
 pub struct Picker {
     query: String,
     pub agent: usize,
+    /// エージェントを自分で選んだ（でなければ利用枠と優先度で自動に決める）
+    manual: bool,
     hi: usize,
     worktree: bool,
     branch: String,
@@ -35,6 +38,7 @@ impl Picker {
         Self {
             query: String::new(),
             agent: cfg.default_agent_index(),
+            manual: false,
             hi: 0,
             worktree: false,
             branch: String::new(),
@@ -95,7 +99,7 @@ impl Picker {
         by_name
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, cfg: &Config) -> Outcome {
+    pub fn show(&mut self, ctx: &egui::Context, cfg: &Config, usages: &Usages) -> Outcome {
         let n_agents = cfg.agents.len().max(1);
         // 文字入力欄に取られる前にキーを拾う
         let (down, up, tab, back_tab) = ctx.input_mut(|i| {
@@ -107,12 +111,18 @@ impl Picker {
             )
         });
         let enter = ctx.input(|i| i.key_pressed(Key::Enter));
+        if !self.manual {
+            self.agent = usage::choose(cfg, usages);
+        }
         if tab {
             self.agent = (self.agent + 1) % n_agents;
+            self.manual = true;
         }
         if back_tab {
             self.agent = (self.agent + n_agents - 1) % n_agents;
+            self.manual = true;
         }
+        let now = usage::now_secs();
         let count = self.filtered().len();
         if down && count > 0 {
             self.hi = (self.hi + 1).min(count - 1);
@@ -132,17 +142,43 @@ impl Picker {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(l!("新しいセッション", "New session")).font(crate::ui::bold(17.0)).color(TEXT));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new(l!("↑↓ 選ぶ · Tab エージェント · Enter 始める · Esc やめる", "↑↓ select · Tab agent · Enter start · Esc cancel")).size(11.0).color(FAINT));
+                    ui.label(RichText::new(l!("↑↓ 選ぶ · Tab エージェントを変える · Enter 始める · Esc やめる", "↑↓ select · Tab change agent · Enter start · Esc cancel")).size(11.0).color(FAINT));
                 });
             });
             ui.add_space(12.0);
 
-            // エージェント
+            // エージェント: ふだんは利用枠と優先度で決めたものを見せるだけ。変えたいときだけ並べる
+            if !self.manual {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    let a = cfg.agents.get(self.agent);
+                    let name = a.map(|a| a.name.as_str()).unwrap_or("");
+                    ui.label(RichText::new(lf!("{name} で始めます", "Starts with {name}")).size(14.0).color(TEXT));
+                    if let Some(l) = a.and_then(|a| usage::of(usages, a)).map(|u| u.label(now)).filter(|l| !l.is_empty()) {
+                        ui.label(RichText::new(l).size(12.0).color(FAINT));
+                    }
+                    // 優先度の高いものを飛ばしたなら、その理由
+                    for &i in cfg.priority_order().iter().take_while(|&&i| i != self.agent) {
+                        let skipped = &cfg.agents[i];
+                        if let Some(t) = usage::of(usages, skipped).and_then(|u| u.blocked_until(cfg.limit_percent, now)) {
+                            ui.label(RichText::new(lf!("（{} は枠をほぼ使い切り · {}に戻る）", "({} is near its limit · resets {})", skipped.name, usage::until(t, now))).size(12.0).color(FAINT));
+                        }
+                    }
+                    if ui.link(RichText::new(l!("変える", "Change")).size(12.0)).clicked() {
+                        self.manual = true;
+                    }
+                });
+            }
+            if self.manual {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 for (i, a) in cfg.agents.iter().enumerate() {
                     let on = i == self.agent;
-                    let text = RichText::new(&a.name).size(14.0).color(if on { TEXT } else { MUTED });
+                    let mut label = a.name.clone();
+                    if let Some(l) = usage::of(usages, a).map(|u| u.label(now)).filter(|l| !l.is_empty()) {
+                        label.push_str(&format!("  {l}"));
+                    }
+                    let text = RichText::new(label).size(14.0).color(if on { TEXT } else { MUTED });
                     let b = egui::Button::new(text)
                         .min_size(vec2(96.0, 34.0))
                         .corner_radius(8.0)
@@ -153,6 +189,7 @@ impl Picker {
                     }
                 }
             });
+            }
             ui.add_space(12.0);
 
             // 絞り込み

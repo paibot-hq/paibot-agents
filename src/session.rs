@@ -1,24 +1,40 @@
-use std::io::{Read, Write};
-use std::path::PathBuf;
+//! 画面の側から見たセッション。エージェント自体はデーモン（daemon.rs）が持っていて、
+//! ここはそこにつないで画面の状態を写し、入力を送るだけ。閉じてもエージェントは止まらない
+use std::net::Shutdown;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use anyhow::Result;
+
+use crate::config::Agent;
+use crate::daemon::{self, AttachReq, Frame, IdReq, Info, MetaReq, Size, SpawnReq, k};
 
 /// 画面を描き直してほしいときに呼ぶ
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
-use std::sync::{Arc, Mutex, mpsc};
-use std::thread;
-use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+/// 画面を閉じるときにエージェントも止める（確認用の画面撮りのときだけ）
+static CLOSE_ON_DROP: AtomicBool = AtomicBool::new(false);
 
-use crate::config::Agent;
+pub fn close_on_drop(on: bool) {
+    CLOSE_ON_DROP.store(on, Ordering::Relaxed);
+}
+
+/// デーモンとのつながりが切れたときの終了コード
+pub const LOST: u32 = 255;
 
 struct Shared {
     last_output: Mutex<Instant>,
-    eof: AtomicBool,
+    /// デーモンから届いた終了コード（つながりが切れたら LOST）
+    ended: Mutex<Option<u32>>,
 }
 
 pub struct Session {
+    /// デーモンの中での番号
+    pub id: u64,
     pub name: String,
     pub agent: String,
     pub cwd: PathBuf,
@@ -36,116 +52,154 @@ pub struct Session {
     pub resume_id: Option<String>,
     /// --session-id などを付ける前のコマンド
     pub base_cmd: String,
-    pub started_at: std::time::SystemTime,
+    pub started_at: SystemTime,
     /// ワークスペースで始めたなら、そのフォルダたち（cwd は1つ目）
     pub roots: Vec<PathBuf>,
-    /// エージェントへの入力は専用のスレッドで書く（相手が読まなくても画面が止まらないように）
-    input: mpsc::Sender<Vec<u8>>,
-    master: Box<dyn MasterPty + Send>,
-    child: Box<dyn Child + Send + Sync>,
+    /// デーモンへ送る枠（書き出しは専用のスレッドで。相手が詰まっても画面が止まらないように）
+    tx: mpsc::Sender<Frame>,
     shared: Arc<Shared>,
+    path: PathBuf,
+    /// 最後にデーモンへ送った名前と覚え書き
+    meta_sent: String,
 }
 
 impl Session {
-    pub fn spawn(
-        name: String,
-        agent: &Agent,
-        cwd: PathBuf,
-        (rows, cols): (u16, u16),
-        scrollback: usize,
-        wake: Wake,
-    ) -> Result<Self> {
-        let pair = native_pty_system()
-            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-            .context(l!("擬似端末を開けませんでした", "Could not open a pseudo terminal"))?;
+    /// デーモンでエージェントを起動して、つなぐ（デーモンが動いていなければ起動する）
+    pub fn spawn(name: String, agent: &Agent, cwd: PathBuf, size: (u16, u16), scrollback: usize, wake: Wake) -> Result<Self> {
+        Self::spawn_at(&daemon::sock_path(), true, name, agent, cwd, size, scrollback, wake)
+    }
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-        let mut cmd = CommandBuilder::new(&shell);
-        if agent.cmd.trim().is_empty() {
-            cmd.arg("-l");
-        } else {
-            // .zshrc のPATHやエイリアスも効くように、対話シェル経由で起動する
-            // （exec を付けるとエイリアスが展開されない）
-            cmd.args(["-l", "-i", "-c", &agent.cmd]);
-        }
-        cmd.cwd(&cwd);
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
-        cmd.env("TERM_PROGRAM", "paibot-agents");
-        // Paibot Agents を Claude Code などの中から起動したとき、その印を子に引き継がない
-        for k in ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT", "TERM_PROGRAM_VERSION", "VSCODE_INJECTION"] {
-            cmd.env_remove(k);
-        }
-        cmd.env("PAIBOT_AGENTS", "1");
-        cmd.env("PAIBOT_AGENTS_SESSION", &name);
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_at(path: &Path, autostart: bool, name: String, agent: &Agent, cwd: PathBuf, (rows, cols): (u16, u16), scrollback: usize, wake: Wake) -> Result<Self> {
+        let mut s = daemon::connect_at(path, autostart)?;
+        let req = SpawnReq { name, agent: agent.name.clone(), cmd: agent.cmd.clone(), cwd, rows, cols, scrollback, meta: serde_json::Value::Null };
+        daemon::send_json(&mut s, k::SPAWN, &req)?;
+        let info: Info = daemon::read_reply(&mut s)?;
+        let mut me = Self::from_conn(path, s, &info, scrollback, wake)?;
+        me.base_cmd = agent.cmd.clone();
+        Ok(me)
+    }
 
-        let child = pair.slave.spawn_command(cmd).with_context(|| lf!("{} を起動できませんでした", "Could not start {}", agent.name))?;
-        drop(pair.slave);
+    /// デーモンで動いているセッションにつなぐ
+    pub fn attach(info: &Info, size: (u16, u16), scrollback: usize, wake: Wake) -> Result<Self> {
+        Self::attach_at(&daemon::sock_path(), info.id, size, scrollback, wake)
+    }
 
-        let mut reader = pair.master.try_clone_reader()?;
-        let mut writer = pair.master.take_writer()?;
-        let (input, input_rx) = mpsc::channel::<Vec<u8>>();
+    fn attach_at(path: &Path, id: u64, (rows, cols): (u16, u16), scrollback: usize, wake: Wake) -> Result<Self> {
+        let mut s = daemon::connect_at(path, false)?;
+        daemon::send_json(&mut s, k::ATTACH, &AttachReq { id, rows, cols })?;
+        let info: Info = daemon::read_reply(&mut s)?;
+        let mut me = Self::from_conn(path, s, &info, scrollback, wake)?;
+        me.load_meta(&info.meta);
+        me.meta_sent = me.meta_key();
+        Ok(me)
+    }
+
+    fn from_conn(path: &Path, stream: UnixStream, info: &Info, scrollback: usize, wake: Wake) -> Result<Self> {
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(info.rows.max(2), info.cols.max(2), scrollback)));
+        let now = Instant::now();
+        let shared = Arc::new(Shared { last_output: Mutex::new(now), ended: Mutex::new(info.exit) });
+
+        let (tx, rx) = mpsc::channel::<Frame>();
+        let mut w = stream.try_clone()?;
         thread::spawn(move || {
-            for bytes in input_rx {
-                if writer.write_all(&bytes).is_err() {
+            for (kind, data) in rx {
+                if daemon::write_frame(&mut w, kind, &data).is_err() {
                     break;
                 }
-                let _ = writer.flush();
             }
+            // 送り残しを書き終えてから切る（画面を閉じる直前の名前の変更なども届くように）
+            let _ = w.shutdown(Shutdown::Both);
         });
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, scrollback)));
-        let shared = Arc::new(Shared { last_output: Mutex::new(Instant::now()), eof: AtomicBool::new(false) });
-
         {
+            let mut r = std::io::BufReader::new(stream.try_clone()?);
             let parser = parser.clone();
-            let input = input.clone();
             let shared = shared.clone();
             thread::spawn(move || {
-                let mut buf = [0u8; 16 * 1024];
+                // 最初の出力はつないだときの画面なので、「動いている」の判定には数えない
+                let mut first = true;
                 loop {
-                    match reader.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            let data = &buf[..n];
-                            let reply = {
-                                let mut p = parser.lock().unwrap();
-                                p.process(data);
-                                replies(data, p.screen())
-                            };
-                            if !reply.is_empty() {
-                                let _ = input.send(reply);
+                    match daemon::read_frame(&mut r) {
+                        Ok((k::OUTPUT, data)) => {
+                            parser.lock().unwrap().process(&data);
+                            if !first {
+                                *shared.last_output.lock().unwrap() = Instant::now();
                             }
-                            *shared.last_output.lock().unwrap() = Instant::now();
+                            first = false;
+                        }
+                        Ok((k::EXIT, data)) => {
+                            *shared.ended.lock().unwrap() = Some(serde_json::from_slice(&data).unwrap_or(1));
+                        }
+                        Ok(_) => continue,
+                        Err(_) => {
+                            shared.ended.lock().unwrap().get_or_insert(LOST);
                             wake();
+                            break;
                         }
                     }
+                    wake();
                 }
-                shared.eof.store(true, Ordering::Relaxed);
-                wake();
             });
         }
 
-        let now = Instant::now();
+        let unix_now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let age = Duration::from_secs(unix_now.saturating_sub(info.created));
+        let cwd = info.cwd.clone();
         Ok(Self {
+            id: info.id,
             branch: crate::git::current_branch(&cwd),
-            name,
-            agent: agent.name.clone(),
+            name: info.name.clone(),
+            agent: info.agent.clone(),
             cwd,
             parser,
-            created: now,
+            created: now.checked_sub(age).unwrap_or(now),
             last_input: now,
             busy: false,
             attention: false,
             exit: None,
             resume_id: None,
-            base_cmd: agent.cmd.clone(),
-            started_at: std::time::SystemTime::now(),
+            base_cmd: String::new(),
+            started_at: UNIX_EPOCH + Duration::from_secs(info.created),
             roots: Vec::new(),
-            input,
-            master: pair.master,
-            child,
+            tx,
             shared,
+            path: path.to_path_buf(),
+            meta_sent: String::new(),
         })
+    }
+
+    fn meta(&self) -> serde_json::Value {
+        serde_json::json!({
+            "base_cmd": self.base_cmd,
+            "resume_id": self.resume_id,
+            "roots": self.roots,
+        })
+    }
+
+    fn load_meta(&mut self, m: &serde_json::Value) {
+        if let Some(c) = m.get("base_cmd").and_then(|v| v.as_str()) {
+            self.base_cmd = c.to_string();
+        }
+        self.resume_id = m.get("resume_id").and_then(|v| v.as_str()).map(String::from);
+        self.roots = m.get("roots").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+    }
+
+    fn meta_key(&self) -> String {
+        format!("{}\n{}", self.name, self.meta())
+    }
+
+    /// 名前や再開用の ID が変わっていたらデーモンにも覚えさせる（あとでつなぎ直したときのため）
+    pub fn sync_meta(&mut self) {
+        let key = self.meta_key();
+        if key == self.meta_sent {
+            return;
+        }
+        let req = MetaReq { id: self.id, name: self.name.clone(), meta: self.meta() };
+        if let Ok(body) = serde_json::to_vec(&req) {
+            if self.tx.send((k::META, body)).is_ok() {
+                self.meta_sent = key;
+            }
+        }
     }
 
     /// ファイルのツリーなどで見せるフォルダ
@@ -162,7 +216,7 @@ impl Session {
         if self.exit.is_some() {
             return;
         }
-        let _ = self.input.send(bytes.to_vec());
+        let _ = self.tx.send((k::INPUT, bytes.to_vec()));
         self.last_input = Instant::now();
         self.parser.lock().unwrap().set_scrollback(0);
     }
@@ -181,7 +235,9 @@ impl Session {
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
-        let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+        if let Ok(body) = serde_json::to_vec(&Size { rows, cols }) {
+            let _ = self.tx.send((k::RESIZE, body));
+        }
         self.parser.lock().unwrap().set_size(rows, cols);
     }
 
@@ -208,22 +264,18 @@ impl Session {
         *self.shared.last_output.lock().unwrap()
     }
 
-    /// 出力が終わっていて子プロセスも終わっていれば終了コードを記録する。変化があれば true
+    /// 終わったと知らせが来ていれば終了コードを記録する。変化があれば true
     pub fn poll_exit(&mut self) -> bool {
-        if self.exit.is_some() || !self.shared.eof.load(Ordering::Relaxed) {
+        if self.exit.is_some() {
             return false;
         }
-        match self.child.try_wait() {
-            Ok(Some(st)) => {
-                self.exit = Some(st.exit_code());
+        match *self.shared.ended.lock().unwrap() {
+            Some(code) => {
+                self.exit = Some(code);
                 self.busy = false;
                 true
             }
-            Ok(None) => false,
-            Err(_) => {
-                self.exit = Some(1);
-                true
-            }
+            None => false,
         }
     }
 
@@ -232,34 +284,21 @@ impl Session {
         self.last_output().saturating_duration_since(self.last_input)
     }
 
+    /// エージェントを止めて、デーモンの一覧からも外す
     pub fn kill(&mut self) {
-        if self.exit.is_none() {
-            let _ = self.child.kill();
-        }
+        let _ = daemon::send_at(&self.path, k::CLOSE, &IdReq { id: self.id });
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.kill();
+        if CLOSE_ON_DROP.load(Ordering::Relaxed) {
+            self.kill();
+        }
+        // つなぐのをやめるだけ。エージェントはデーモンの中で動き続ける。
+        // 送り先を閉じると、書き出しのスレッドが残りを送ってから接続を切る
+        self.tx = mpsc::channel().0;
     }
-}
-
-/// 端末への問い合わせに答える（codex などは返事がないと起動で止まる）
-fn replies(data: &[u8], screen: &vt100::Screen) -> Vec<u8> {
-    let has = |n: &[u8]| data.windows(n.len()).any(|w| w == n);
-    let mut out = Vec::new();
-    if has(b"\x1b[6n") {
-        let (r, c) = screen.cursor_position();
-        out.extend(format!("\x1b[{};{}R", r + 1, c + 1).bytes());
-    }
-    if has(b"\x1b[c") || has(b"\x1b[0c") {
-        out.extend(b"\x1b[?62;22c");
-    }
-    if has(b"\x1b[>c") || has(b"\x1b[>0c") {
-        out.extend(b"\x1b[>0;10;1c");
-    }
-    out
 }
 
 /// 入力欄の枠や操作の説明など、中身ではない行
@@ -278,26 +317,47 @@ fn is_chrome(t: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::OnceLock;
+
+    /// テスト用のデーモン（このプロセスの中で1つだけ動かす）
+    fn daemon() -> &'static Path {
+        static PATH: OnceLock<PathBuf> = OnceLock::new();
+        PATH.get_or_init(|| {
+            let p = std::env::temp_dir().join(format!("pa-test-{}.sock", std::process::id()));
+            let q = p.clone();
+            thread::spawn(move || daemon::serve(&q, None).unwrap());
+            for _ in 0..50 {
+                if UnixStream::connect(&p).is_ok() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            p
+        })
+    }
 
     fn spawn(cmd: &str) -> Session {
         let agent = Agent { name: "t".into(), cmd: cmd.into() };
-        Session::spawn("t".into(), &agent, std::env::temp_dir(), (24, 80), 100, Arc::new(|| {})).unwrap()
+        Session::spawn_at(daemon(), false, "t".into(), &agent, std::env::temp_dir(), (24, 80), 100, Arc::new(|| {})).unwrap()
+    }
+
+    fn wait_for(s: &Session, text: &str) -> bool {
+        for _ in 0..50 {
+            if s.parser.lock().unwrap().screen().contents().contains(text) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        false
     }
 
     #[test]
     fn input_reaches_the_program() {
         let mut s = spawn("cat");
-        std::thread::sleep(Duration::from_millis(1500));
+        thread::sleep(Duration::from_millis(1500));
         s.write("こんにちは abc\r".as_bytes());
-        let mut ok = false;
-        for _ in 0..40 {
-            std::thread::sleep(Duration::from_millis(100));
-            if s.parser.lock().unwrap().screen().contents().contains("こんにちは abc") {
-                ok = true;
-                break;
-            }
-        }
-        assert!(ok, "画面: {}", s.parser.lock().unwrap().screen().contents());
+        assert!(wait_for(&s, "こんにちは abc"), "画面: {}", s.parser.lock().unwrap().screen().contents());
+        s.kill();
     }
 
     #[test]
@@ -308,5 +368,45 @@ mod tests {
         s.write(&big);
         s.write(b"more");
         assert!(t.elapsed() < Duration::from_millis(200), "{:?}", t.elapsed());
+        s.kill();
+    }
+
+    #[test]
+    fn keeps_running_after_the_screen_goes_away_and_can_be_reattached() {
+        let mut s = spawn("cat");
+        thread::sleep(Duration::from_millis(1500));
+        s.write(b"before\r");
+        assert!(wait_for(&s, "before"));
+        s.name = "renamed".into();
+        s.resume_id = Some("abc".into());
+        s.sync_meta();
+        let id = s.id;
+        drop(s);
+        thread::sleep(Duration::from_millis(200));
+
+        let info = daemon::list_at(daemon()).unwrap().into_iter().find(|i| i.id == id).expect("一覧に残っている");
+        assert_eq!(info.exit, None);
+        assert_eq!(info.name, "renamed");
+        let mut again = Session::attach_at(daemon(), id, (24, 80), 100, Arc::new(|| {})).unwrap();
+        assert_eq!(again.resume_id.as_deref(), Some("abc"));
+        assert!(wait_for(&again, "before"), "画面: {}", again.parser.lock().unwrap().screen().contents());
+        again.write(b"after\r");
+        assert!(wait_for(&again, "after"));
+        again.kill();
+        thread::sleep(Duration::from_millis(200));
+        assert!(!daemon::list_at(daemon()).unwrap().iter().any(|i| i.id == id), "止めたら一覧から消える");
+    }
+
+    #[test]
+    fn exit_code_reaches_the_screen() {
+        let mut s = spawn("exit 3");
+        for _ in 0..50 {
+            if s.poll_exit() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(s.exit, Some(3));
+        s.kill();
     }
 }

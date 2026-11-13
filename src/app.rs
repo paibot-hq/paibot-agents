@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -170,6 +170,9 @@ enum Action {
     ResumeAll,
     Forget(usize),
     Child(String),
+    /// 途中までの作業を別のエージェントで続ける
+    Handoff(usize),
+    Map,
 }
 
 pub struct PaibotAgentsApp {
@@ -210,6 +213,23 @@ pub struct PaibotAgentsApp {
     /// paibot.app とのつながり（つないでいなければ None）
     runner: Option<Arc<Mutex<crate::runner::Status>>>,
     window_focused: bool,
+    /// 止めたセッション（デーモンの一覧から消えるまでのあいだ、つなぎ直さない）
+    closed: HashSet<u64>,
+    /// 最後にデーモンの一覧を見た時刻
+    adopted_at: Instant,
+    /// エージェントごとの利用枠（新しいセッションのエージェント選びに使う）
+    usage: crate::usage::Monitor,
+    /// 起動してから貼り付ける最初の入力（起動時に渡せないエージェント用）: (セッション番号, 貼る時刻, 文)
+    pending_paste: Vec<(u64, Instant, String)>,
+    /// 一覧の並び（セッション番号）。新しいものと、あなたを待ち始めたものが上に来る。選んでも動かない
+    order: Vec<u64>,
+    /// 名前を自動で付けたもの（最初に頼んだことから。裏で探して、見つかったらここに入る）
+    titles_found: Arc<Mutex<Vec<(u64, String)>>>,
+    title_tried: HashMap<u64, Instant>,
+    /// 自分で名前を変えたもの（自動では付け直さない）
+    renamed: HashSet<u64>,
+    /// 一覧の「前」を開いているか
+    show_past: bool,
 }
 
 impl PaibotAgentsApp {
@@ -234,6 +254,8 @@ impl PaibotAgentsApp {
         if recent.is_empty() && workspace.is_none() {
             recent.push(tilde(&dir));
         }
+        let cfg_agents = cfg.agents.clone();
+        let wake_usage = wake.clone();
         let mut app = Self {
             term: TermState::new(cfg.font_size),
             cfg,
@@ -269,7 +291,24 @@ impl PaibotAgentsApp {
             shot: crate::shot::Shot::from_env(),
             runner: None,
             window_focused: true,
+            closed: HashSet::new(),
+            adopted_at: Instant::now(),
+            usage: crate::usage::Monitor::spawn(cfg_agents, wake_usage),
+            pending_paste: Vec::new(),
+            order: Vec::new(),
+            titles_found: Arc::new(Mutex::new(Vec::new())),
+            title_tried: HashMap::new(),
+            renamed: HashSet::new(),
+            show_past: false,
         };
+        // デーモンで動いているセッションにつなぎ直す。
+        // 確認用に画面を撮るときは、撮り終えたら止める（設定フォルダを分けたときだけ、つなぎ直しも試す）
+        if app.shot.is_some() {
+            crate::session::close_on_drop(true);
+        }
+        if app.adopts() {
+            app.adopt();
+        }
         // paibot.app とつないでいれば、裏で仕事を受ける（確認用に画面を撮るときはつながない）
         if !app.cfg.paibot_token.is_empty() && app.shot.is_none() {
             let st = Arc::new(Mutex::new(crate::runner::Status::default()));
@@ -282,7 +321,7 @@ impl PaibotAgentsApp {
         }
         // 初めて起動したときは設定から
         let shot_ui = app.shot.as_ref().map(|s| s.ui.clone()).unwrap_or_default();
-        if (!config::exists() && app.shot.is_none()) || shot_ui == "setup" {
+        if (!config::exists() && app.shot.is_none()) || shot_ui.starts_with("setup") {
             app.setup = Some(Setup::new(&app.cfg, !config::exists(), &dir, &cc.egui_ctx));
         }
         if let Some(name) = start {
@@ -369,12 +408,81 @@ impl PaibotAgentsApp {
         app
     }
 
-    fn flash(&mut self, msg: impl Into<String>) {
-        self.flash = Some((msg.into(), Instant::now()));
+    /// デーモンのセッションにつなぎ直すか（画面撮りでは、設定フォルダを分けたときだけ）
+    fn adopts(&self) -> bool {
+        self.shot.is_none() || std::env::var_os("PAIBOT_AGENTS_CONFIG_DIR").is_some()
     }
 
-    fn alive(&self) -> usize {
-        self.sessions.iter().filter(|s| s.exit.is_none()).count()
+    /// デーモンにあって、まだ一覧にないセッションにつなぐ（ターミナルで始めたものも）
+    fn adopt(&mut self) {
+        self.adopted_at = Instant::now();
+        let Ok(list) = crate::daemon::list() else { return };
+        self.closed.retain(|id| list.iter().any(|i| i.id == *id));
+        let before = self.sessions.len();
+        for info in list {
+            if self.closed.contains(&info.id) || self.sessions.iter().any(|s| s.id == info.id) {
+                continue;
+            }
+            match Session::attach(&info, self.term.size, self.cfg.scrollback, self.wake.clone()) {
+                Ok(s) => {
+                    // 「前回のセッション」に同じものが残っていれば外す
+                    self.dormant.retain(|d| !((d.cwd == s.cwd && d.name == s.name) || (d.resume_id.is_some() && d.resume_id == s.resume_id)));
+                    self.sessions.push(s);
+                }
+                Err(e) => self.flash(lf!("{} につなげませんでした: {e:#}", "Could not attach to {}: {e:#}", info.name)),
+            }
+        }
+        if self.sessions.len() != before {
+            if before == 0 {
+                self.sel = 0;
+                self.term.reset();
+            }
+            self.sync_git_dirs();
+        }
+    }
+
+    /// 一覧に出す順（sessions の添字）
+    fn order(&mut self) -> Vec<usize> {
+        let ids: Vec<u64> = self.sessions.iter().map(|s| s.id).collect();
+        self.order.retain(|id| ids.contains(id));
+        // まだ並びにないもの（新しく始めた・つなぎ直した）は、新しい順に上へ
+        // （始めた時刻が同じ秒なら、あとから一覧に入ったものを上に）
+        let mut fresh: Vec<(usize, &Session)> = self.sessions.iter().enumerate().filter(|(_, s)| !self.order.contains(&s.id)).collect();
+        fresh.sort_by_key(|&(n, s)| std::cmp::Reverse((s.started_at, n)));
+        let mut order: Vec<u64> = fresh.iter().map(|(_, s)| s.id).collect();
+        order.append(&mut self.order);
+        self.order = order;
+        self.order.iter().filter_map(|id| self.sessions.iter().position(|s| s.id == *id)).collect()
+    }
+
+    /// 名前がまだフォルダ名のままなら、最初に頼んだことから付ける（重いので裏で読む）
+    fn auto_titles(&mut self) {
+        for (id, t) in std::mem::take(&mut *self.titles_found.lock().unwrap()) {
+            if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id && !self.renamed.contains(&id)) {
+                s.name = t;
+                s.sync_meta();
+            }
+        }
+        for s in &self.sessions {
+            let folder = s.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let default = s.name == folder || s.branch.as_deref() == Some(s.name.as_str());
+            let Some(rid) = s.resume_id.clone() else { continue };
+            if !default || self.renamed.contains(&s.id) || s.exit.is_some() || self.title_tried.get(&s.id).is_some_and(|t| t.elapsed() < Duration::from_secs(8)) {
+                continue;
+            }
+            self.title_tried.insert(s.id, Instant::now());
+            let (id, base, cwd, found, wake) = (s.id, s.base_cmd.clone(), s.cwd.clone(), self.titles_found.clone(), self.wake.clone());
+            std::thread::spawn(move || {
+                if let Some(t) = crate::handoff::title(&base, &cwd, &rid) {
+                    found.lock().unwrap().push((id, t));
+                    wake();
+                }
+            });
+        }
+    }
+
+    fn flash(&mut self, msg: impl Into<String>) {
+        self.flash = Some((msg.into(), Instant::now()));
     }
 
     /// 今のセッションのワークスペース（なければ作る）
@@ -428,6 +536,7 @@ impl PaibotAgentsApp {
     }
 
     fn open_new(&mut self) {
+        self.usage.refresh();
         self.picker = Some(Picker::new(&self.cfg, &self.recent));
     }
 
@@ -445,7 +554,7 @@ impl PaibotAgentsApp {
             let roots: Vec<PathBuf> = roots.iter().filter_map(|r| std::fs::canonicalize(r).ok()).filter(|r| r.is_dir()).collect();
             let Some(first) = roots.first().cloned() else { bail!("{}", lf!("ワークスペースのフォルダが見つかりません", "None of the workspace folders were found")) };
             let name = name.unwrap_or_else(|| first.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
-            return self.spawn(name, &agent, first, None, roots);
+            return self.spawn(name, &agent, first, None, roots, None);
         }
         let dir = expand(dir);
         if !dir.is_dir() {
@@ -464,22 +573,36 @@ impl PaibotAgentsApp {
         self.recent.insert(0, d);
         self.recent.truncate(8);
         config::save_recent(&self.recent);
-        self.spawn(name, &agent, cwd, None, Vec::new())
+        self.spawn(name, &agent, cwd, None, Vec::new(), None)
     }
 
     /// エージェントを起動して一覧に加える。saved があればその続きから
-    fn spawn(&mut self, name: String, agent: &Agent, cwd: PathBuf, saved: Option<&Saved>, roots: Vec<PathBuf>) -> Result<()> {
+    /// prompt があれば、それを最初の入力にして始める
+    fn spawn(&mut self, name: String, agent: &Agent, cwd: PathBuf, saved: Option<&Saved>, roots: Vec<PathBuf>, prompt: Option<String>) -> Result<()> {
         let base = agent.cmd.clone();
         let resumed = saved
             .filter(|s| s.resumable())
             .and_then(|s| s.resume_id.as_deref().and_then(|id| resume::resume_cmd(&base, id).map(|c| (c, Some(id.to_string())))));
         let (cmd, id) = resumed.unwrap_or_else(|| resume::start_cmd(&base));
-        let cmd = if roots.len() > 1 { resume::add_dirs(&cmd, &roots[1..]) } else { cmd };
+        let mut cmd = if roots.len() > 1 { resume::add_dirs(&cmd, &roots[1..]) } else { cmd };
+        // そのセッションだけ: claude の利用枠を知るステータス表示
+        cmd.push_str(&crate::usage::launch_args(&self.cfg, resume::kind(&base), &cwd));
+        let mut paste_later = None;
+        if let Some(p) = prompt {
+            match crate::handoff::with_prompt(&cmd, &p) {
+                Some(c) => cmd = c,
+                None => paste_later = Some(p),
+            }
+        }
         let run = Agent { name: agent.name.clone(), cmd };
         let mut s = Session::spawn(name, &run, cwd.clone(), self.term.size, self.cfg.scrollback, self.wake.clone())?;
         s.base_cmd = base;
         s.resume_id = id;
         s.roots = roots;
+        if let Some(p) = paste_later {
+            // 起動してすぐは入力を受け付けないことがあるので、少し待ってから貼る
+            self.pending_paste.push((s.id, Instant::now() + Duration::from_secs(5), p));
+        }
         self.sessions.push(s);
         self.sel = self.sessions.len() - 1;
         self.term.reset();
@@ -500,6 +623,27 @@ impl PaibotAgentsApp {
         Ok(())
     }
 
+    /// 途中までの作業を、別のエージェントの新しいセッションで続ける（元のセッションはそのまま残す）
+    fn handoff(&mut self, i: usize) {
+        // codex の会話の ID はあとから探すので、先に覚え直す
+        self.persist();
+        let Some(s) = self.sessions.get(i) else { return };
+        let text = match crate::handoff::from_session(&s.agent, &s.base_cmd, &s.cwd, s.resume_id.as_deref()) {
+            Ok(t) => t,
+            Err(e) => return self.flash(format!("{e:#}")),
+        };
+        let usages = self.usage.get();
+        let Some(ai) = crate::usage::choose_other(&self.cfg, &usages, resume::kind(&s.base_cmd)) else {
+            return self.flash(l!("引き継げる別のエージェントが設定にありません", "No other agent to hand off to in the settings"));
+        };
+        let agent = self.cfg.agents[ai].clone();
+        let (name, cwd, roots, from) = (s.name.clone(), s.cwd.clone(), s.roots.clone(), s.agent.clone());
+        match self.spawn(name, &agent, cwd, None, roots, Some(text)) {
+            Ok(()) => self.flash(lf!("{from} の続きを {} で始めました", "Continuing {from}'s work with {}", agent.name)),
+            Err(e) => self.flash(format!("{e:#}")),
+        }
+    }
+
     fn resume_dormant(&mut self, i: usize) {
         if i >= self.dormant.len() {
             return;
@@ -512,7 +656,7 @@ impl PaibotAgentsApp {
             .find(|a| a.name == saved.agent)
             .cloned()
             .unwrap_or_else(|| Agent { name: saved.agent.clone(), cmd: saved.cmd.clone() });
-        if let Err(e) = self.spawn(saved.name.clone(), &agent, saved.cwd.clone(), Some(&saved), saved.roots.clone()) {
+        if let Err(e) = self.spawn(saved.name.clone(), &agent, saved.cwd.clone(), Some(&saved), saved.roots.clone(), None) {
             self.flash(lf!("{} を再開できませんでした: {e:#}", "Could not resume {}: {e:#}", saved.name));
             self.dormant.insert(i, saved);
         }
@@ -546,6 +690,9 @@ impl PaibotAgentsApp {
             })
             .collect();
         list.extend(self.dormant.iter().cloned());
+        for s in self.sessions.iter_mut() {
+            s.sync_meta();
+        }
         if self.shot.is_none() || std::env::var_os("PAIBOT_AGENTS_CONFIG_DIR").is_some() {
             resume::save(&list);
         }
@@ -561,6 +708,7 @@ impl PaibotAgentsApp {
         if i < self.sessions.len() {
             let mut s = self.sessions.remove(i);
             s.kill();
+            self.closed.insert(s.id);
             if self.sel >= self.sessions.len() {
                 self.sel = self.sessions.len().saturating_sub(1);
             }
@@ -628,6 +776,8 @@ impl PaibotAgentsApp {
                     }
                 }
             }
+            Action::Handoff(i) => self.handoff(i),
+            Action::Map => self.side = if self.side == Some(Side::Map) { None } else { Some(Side::Map) },
             Action::Child(id) => {
                 if self.side == Some(Side::Child) && self.child_view.as_ref().is_some_and(|v| v.id == id) {
                     self.side = None;
@@ -681,10 +831,25 @@ impl PaibotAgentsApp {
                 .filter_map(|s| s.resume_id.clone().map(|id| (id, s.cwd.clone())))
                 .collect();
         }
+        if !self.pending_paste.is_empty() {
+            let now = Instant::now();
+            let (due, wait): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_paste).into_iter().partition(|(_, at, _)| *at <= now);
+            self.pending_paste = wait;
+            for (id, _, text) in due {
+                if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
+                    s.paste(&text);
+                    s.write(b"\r");
+                }
+            }
+        }
+        if self.adopts() && self.adopted_at.elapsed() > Duration::from_secs(3) {
+            self.adopt();
+        }
         let now = Instant::now();
         let idle = Duration::from_secs_f64(self.cfg.idle_secs.max(0.2));
         let min_busy = Duration::from_secs_f64(self.cfg.min_busy_secs.max(0.0));
         let viewing = self.window_focused && !self.dialog_open();
+        let mut to_top = Vec::new();
         for (i, s) in self.sessions.iter_mut().enumerate() {
             let watching = viewing && i == self.sel;
             if watching {
@@ -693,6 +858,7 @@ impl PaibotAgentsApp {
             if s.poll_exit() {
                 if !watching {
                     s.attention = true;
+                    to_top.push(s.id);
                     if self.cfg.notify {
                         notify::send(&lf!("{} が終了しました（{}）", "{} exited ({})", s.name, s.exit.unwrap_or(0)), &s.agent);
                     }
@@ -705,12 +871,19 @@ impl PaibotAgentsApp {
             let busy = now.duration_since(s.last_output()) < idle && s.work_after_input() > Duration::from_millis(300);
             if s.busy && !busy && s.work_after_input() >= min_busy && !watching {
                 s.attention = true;
+                to_top.push(s.id);
                 if self.cfg.notify {
                     notify::send(&lf!("{} が待っています", "{} is waiting for you", s.name), &s.agent);
                 }
             }
             s.busy = busy;
         }
+        // あなたを待ち始めたものは一覧の上へ
+        for id in to_top {
+            self.order.retain(|o| *o != id);
+            self.order.insert(0, id);
+        }
+        self.auto_titles();
         if self.persisted.elapsed() > Duration::from_secs(10) {
             self.persist();
         }
@@ -795,11 +968,17 @@ impl PaibotAgentsApp {
                 }
             }
         }
+        let order = self.order();
+        let pos = order.iter().position(|&i| i == self.sel).unwrap_or(0);
         if take(Key::OpenBracket) {
-            self.select(self.sel.saturating_sub(1));
+            if let Some(&i) = order.get(pos.saturating_sub(1)) {
+                self.select(i);
+            }
         }
         if take(Key::CloseBracket) {
-            self.select(self.sel + 1);
+            if let Some(&i) = order.get(pos + 1) {
+                self.select(i);
+            }
         }
         if take(Key::Equals) || take(Key::Plus) {
             self.term.font_size = (self.term.font_size + 1.0).min(32.0);
@@ -811,272 +990,254 @@ impl PaibotAgentsApp {
             self.term.font_size = self.cfg.font_size;
         }
         let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
-        for (i, k) in nums.into_iter().enumerate() {
+        for (n, k) in nums.into_iter().enumerate() {
             if take(k) {
-                self.select(i);
+                if let Some(&i) = order.get(n) {
+                    self.select(i);
+                }
             }
         }
     }
 
     fn sidebar(&mut self, ui: &mut Ui) -> Vec<Action> {
         let mut acts = Vec::new();
-        // 上の帯（左に信号機ボタンが乗る）
+        // 上の帯（左に信号機ボタンが乗る）: 新しい会話と設定だけ
         let top = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover()).0;
         ui::drag_area(ui, top, "side-drag");
         let mut top_ui = ui.new_child(egui::UiBuilder::new().max_rect(top).layout(Layout::right_to_left(Align::Center)));
-        if ui::icon_button(&mut top_ui, ui::icon::PLUS, l!("新しいセッション  ⌘N", "New session  ⌘N"), false).clicked() {
+        if ui::icon_button(&mut top_ui, ui::icon::PLUS, l!("新しく始める  ⌘N", "New  ⌘N"), false).clicked() {
             acts.push(Action::New);
         }
-        ui.add_space(14.0);
+        if ui::icon_button(&mut top_ui, ui::icon::GEAR_SIX, l!("設定  ⌘,", "Settings  ⌘,"), false).clicked() {
+            acts.push(Action::Settings);
+        }
+        ui.add_space(10.0);
 
-        // 下: 前回のセッションと設定
-        egui::TopBottomPanel::bottom("sidebar-foot")
-            .frame(Frame::new().inner_margin(Margin { top: 6, ..Default::default() }))
-            .show_separator_line(false)
-            .show_inside(ui, |ui| {
-                if !self.dormant.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui::section(ui, l!("前回のセッション", "Last time"));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let r = ui.add(egui::Button::new(RichText::new(l!("全部再開", "Resume all")).size(11.0).color(MUTED)).frame(false));
-                            if r.clicked() {
-                                acts.push(Action::ResumeAll);
-                            }
-                        });
-                    });
-                    ui.add_space(2.0);
-                    ScrollArea::vertical().id_salt("dormant-list").max_height(220.0).show(ui, |ui| {
-                        ui.spacing_mut().interact_size.y = 18.0;
-                        ui.spacing_mut().item_spacing.y = 2.0;
-                        for (i, d) in self.dormant.iter().enumerate() {
-                            let id = Id::new(("dormant", i));
-                            let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
-                            let inner = Frame::new()
-                                .fill(if hovered { CARD_HOVER } else { Color32::TRANSPARENT })
-                                .corner_radius(7)
-                                .inner_margin(Margin::symmetric(8, 5))
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    ui.horizontal(|ui| {
-                                        let g = if d.resumable() { ui::icon::ARROW_COUNTER_CLOCKWISE } else { ui::icon::PLAY };
-                                        ui.label(RichText::new(g).size(13.0).color(if hovered { ACCENT } else { FAINT }));
-                                        ui.add(Label::new(RichText::new(&d.name).size(13.0).color(MUTED)).truncate());
-                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                            if hovered
-                                                && ui.add(egui::Button::new(RichText::new(ui::icon::X).size(12.0).color(FAINT)).frame(false)).on_hover_text(l!("忘れる", "Forget")).clicked()
-                                            {
-                                                acts.push(Action::Forget(i));
-                                            }
-                                            ui.label(RichText::new(&d.agent).size(11.0).color(FAINT));
-                                        });
-                                    });
-                                });
-                            let how = if d.resumable() { l!("会話の続きから再開", "Resumes the conversation") } else { l!("同じフォルダで開き直す", "Starts fresh in the same folder") };
-                            let r = ui.interact(inner.response.rect, id, Sense::click()).on_hover_text(format!("{}\n{how}", tilde(&d.cwd)));
-                            if r.clicked() {
-                                acts.push(Action::Resume(i));
-                            }
-                        }
-                    });
-                    ui.add_space(6.0);
-                }
-                if let Some(st) = &self.runner {
-                    let s = st.lock().unwrap().clone();
-                    ui.horizontal(|ui| {
-                        let (dot, text) = if s.connected {
-                            (OK, if s.running > 0 { lf!("paibot · 動作中 {}", "paibot · running {}", s.running) } else { l!("paibot につながっています", "Connected to paibot").to_string() })
-                        } else {
-                            (FAINT, l!("paibot につながっていません", "Not connected to paibot").to_string())
-                        };
-                        ui.label(RichText::new("●").size(9.0).color(dot));
-                        let tip = s.last_error.clone().unwrap_or_else(|| s.recent.join("\n"));
-                        let r = ui.label(RichText::new(text).size(11.5).color(MUTED));
-                        if !tip.is_empty() {
-                            r.on_hover_text(tip);
-                        }
-                    });
-                    ui.add_space(2.0);
-                }
+        // 下: 利用枠の残りと、paibot.app とのつながり
+        let usages = self.usage.get();
+        let mut refresh = false;
+        egui::TopBottomPanel::bottom("sidebar-foot").frame(Frame::new().inner_margin(Margin { top: 8, ..Default::default() })).show_separator_line(false).show_inside(ui, |ui| {
+            refresh = self.credits(ui, &usages);
+            if let Some(st) = &self.runner {
+                let s = st.lock().unwrap().clone();
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    let r = ui.add(egui::Button::new(RichText::new(lf!("{}  設定", "{}  Settings", ui::icon::GEAR_SIX)).size(12.0).color(FAINT)).frame(false));
-                    if r.on_hover_text("⌘,").clicked() {
-                        acts.push(Action::Settings);
+                    let (dot, text) = if s.connected {
+                        (OK, if s.running > 0 { lf!("paibot · 動作中 {}", "paibot · running {}", s.running) } else { l!("paibot につながっています", "Connected to paibot").to_string() })
+                    } else {
+                        (FAINT, l!("paibot につながっていません", "Not connected to paibot").to_string())
+                    };
+                    ui.label(RichText::new("●").size(9.0).color(dot));
+                    let tip = s.last_error.clone().unwrap_or_else(|| s.recent.join("\n"));
+                    let r = ui.label(RichText::new(text).size(11.5).color(MUTED));
+                    if !tip.is_empty() {
+                        r.on_hover_text(tip);
                     }
                 });
-            });
-
-        ui.horizontal(|ui| {
-            ui::section(ui, l!("セッション", "Sessions"));
-            let busy = self.sessions.iter().filter(|s| s.busy).count();
-            let waiting = self.sessions.iter().filter(|s| s.attention).count();
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if waiting > 0 {
-                    ui.label(RichText::new(lf!("待ち {waiting}", "{waiting} waiting")).size(11.0).color(WAITING));
-                }
-                if busy > 0 {
-                    ui.label(RichText::new(lf!("動作中 {busy}", "{busy} running")).size(11.0).color(ACCENT));
-                }
-            });
+            }
         });
-        ui.add_space(4.0);
-
-        if self.sessions.is_empty() {
-            ui.add_space(6.0);
-            ui.label(RichText::new(l!("まだありません", "None yet")).size(12.0).color(FAINT));
-            return acts;
+        if refresh {
+            self.usage.refresh();
         }
 
-        let info = self.git_info.lock().unwrap().clone();
-        let kids = self.call_tree();
-        let viewing_child = if self.side == Some(Side::Child) { self.child_view.as_ref().map(|v| v.id.clone()) } else { None };
+        let order = self.order();
+        let unix_now = crate::usage::now_secs();
         let now = Instant::now();
         ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            for (i, s) in self.sessions.iter().enumerate() {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            if self.sessions.is_empty() {
+                ui.add_space(6.0);
+                ui.label(RichText::new(l!("まだありません", "Nothing yet")).size(12.0).color(FAINT));
+            }
+            for (n, &i) in order.iter().enumerate() {
+                let s = &self.sessions[i];
                 let selected = i == self.sel;
-                let id = Id::new(("card", i));
+                let id = Id::new(("row", s.id));
                 let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
-                let fill = if selected { CARD_SEL } else if hovered { CARD_HOVER } else { CARD };
-                let inner = Frame::new().fill(fill).corner_radius(CornerRadius::same(8)).inner_margin(Margin { left: 10, right: 10, top: 8, bottom: 8 }).show(ui, |ui| {
+                let fill = if selected { CARD_SEL } else if hovered { CARD_HOVER } else { Color32::TRANSPARENT };
+                let folder = s.cwd.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+                let inner = Frame::new().fill(fill).corner_radius(CornerRadius::same(7)).inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.spacing_mut().item_spacing.y = 3.0;
-                    ui.spacing_mut().interact_size.y = 16.0;
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         ui::status_dot(ui, s);
-                        let col = if s.exit.is_some() { MUTED } else { TEXT };
-                        ui.add(Label::new(RichText::new(&s.name).font(ui::bold(13.5)).color(col)).truncate());
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if i < 9 && (hovered || selected) {
-                                ui.label(RichText::new(format!("⌘{}", i + 1)).size(10.5).color(FAINT));
+                            if folder != s.name {
+                                ui.label(RichText::new(&folder).size(11.0).color(FAINT));
                             }
+                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                let col = if s.exit.is_some() { FAINT } else if s.attention || selected { TEXT } else { MUTED };
+                                let t = RichText::new(&s.name).size(13.0).color(col);
+                                ui.add(Label::new(if s.attention { t.strong() } else { t }).truncate());
+                            });
                         });
                     });
-                    let g = info.get(&s.cwd);
-                    ui.horizontal(|ui| {
-                        ui.add_space(20.0);
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        let mut meta = s.agent.clone();
-                        if let Some(b) = g.and_then(|g| g.branch.clone()).or_else(|| s.branch.clone()) {
-                            if b != s.name {
-                                meta.push_str(&format!("  {} {b}", ui::icon::GIT_BRANCH));
-                            }
-                        }
-                        let t = match s.exit {
-                            Some(code) => lf!("終了 {code}", "Exited {code}"),
-                            None => elapsed(now.duration_since(s.created).as_secs()),
-                        };
-                        meta.push_str(&format!("  ·  {t}"));
-                        ui.add(Label::new(RichText::new(meta).size(11.5).color(FAINT)).truncate());
-                    });
-                    let pv = s.preview();
-                    if !pv.is_empty() {
-                        ui.horizontal(|ui| {
-                            ui.add_space(20.0);
-                            ui.add(Label::new(RichText::new(pv).font(FontId::monospace(10.5)).color(MUTED.gamma_multiply(0.8))).truncate());
-                        });
-                    }
-                    if let Some(g) = g.filter(|g| g.files > 0) {
-                        ui.horizontal(|ui| {
-                            ui.add_space(20.0);
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            ui.label(RichText::new(format!("+{}", g.added)).font(FontId::monospace(10.5)).color(OK.gamma_multiply(0.85)));
-                            ui.label(RichText::new(format!("−{}", g.removed)).font(FontId::monospace(10.5)).color(BAD.gamma_multiply(0.85)));
-                            ui.label(RichText::new(lf!("{} ファイル", "{} files", g.files)).size(10.5).color(FAINT));
-                        });
-                    }
                 });
-                let rect = inner.response.rect;
-                if selected {
-                    let bar = Rect::from_min_size(rect.left_top() + vec2(0.0, 9.0), vec2(2.5, rect.height() - 18.0));
-                    ui.painter().rect_filled(bar, 2.0, ACCENT);
-                } else if s.attention {
-                    let bar = Rect::from_min_size(rect.left_top() + vec2(0.0, 9.0), vec2(2.5, rect.height() - 18.0));
-                    ui.painter().rect_filled(bar, 2.0, WAITING);
+                let (st, _) = ui::status_text(s);
+                let mut tip = format!("{}  ·  {st}", s.agent);
+                if let Some(u) = usages.get(&resume::kind(&s.base_cmd)).map(|u| u.label(unix_now)).filter(|l| !l.is_empty()) {
+                    tip.push_str(&format!("  ·  {u}"));
                 }
-                let resp = ui.interact(rect, id, Sense::click());
+                tip.push_str(&format!("\n{}\n{}", tilde(&s.cwd), elapsed(now.duration_since(s.created).as_secs())));
+                if n < 9 {
+                    tip.push_str(&format!("  ·  ⌘{}", n + 1));
+                }
+                let pv = s.preview();
+                if !pv.is_empty() {
+                    tip.push_str(&format!("\n\n{pv}"));
+                }
+                let resp = ui.interact(inner.response.rect, id, Sense::click()).on_hover_text(tip);
                 if resp.clicked() {
                     acts.push(Action::Select(i));
                 }
                 if resp.double_clicked() {
                     acts.push(Action::Rename(i));
                 }
-                resp.context_menu(|ui| {
-                    let item = |ui: &mut Ui, g: &str, t: &str| ui.button(format!("{g}  {t}")).clicked();
-                    if item(ui, ui::icon::PENCIL_SIMPLE, l!("名前を変える", "Rename")) {
-                        acts.push(Action::Rename(i));
-                        ui.close();
-                    }
-                    if item(ui, ui::icon::FOLDER_SIMPLE, l!("ファイル", "Files")) {
-                        acts.push(Action::Files(i));
-                        ui.close();
-                    }
-                    if item(ui, ui::icon::GIT_DIFF, l!("差分", "Diff")) {
-                        acts.push(Action::Diff(i));
-                        ui.close();
-                    }
-                    if item(ui, ui::icon::CODE, &lf!("{} で開く", "Open in {}", self.cfg.editor_app)) {
-                        acts.push(Action::Editor(i));
-                        ui.close();
-                    }
-                    if item(ui, ui::icon::FOLDER_OPEN, l!("Finder で開く", "Show in Finder")) {
-                        acts.push(Action::Finder(i));
-                        ui.close();
-                    }
-                    ui.separator();
-                    let label = if s.exit.is_some() { l!("一覧から外す", "Remove from list") } else { l!("止める…", "Stop…") };
-                    if ui.button(RichText::new(format!("{}  {label}", ui::icon::STOP)).color(BAD)).clicked() {
-                        acts.push(if s.exit.is_some() { Action::Remove(i) } else { Action::Kill(i) });
-                        ui.close();
-                    }
-                });
-                // 呼んだエージェントを下にぶら下げる（さらに呼んだものは字下げ。新しいものから8つ）
-                let list = children::flatten(&kids[i]);
-                let skip = list.len().saturating_sub(8);
-                if skip > 0 {
-                    ui.horizontal(|ui| {
-                        ui.add_space(30.0);
-                        ui.label(RichText::new(lf!("ほか {skip} 件", "{skip} more")).size(10.5).color(FAINT));
-                    });
+                resp.context_menu(|ui| self.session_menu(ui, i, &mut acts));
+            }
+
+            // 前回のセッション: ふだんは畳んでおく
+            if !self.dormant.is_empty() {
+                ui.add_space(10.0);
+                let r = ui.add(
+                    egui::Button::new(RichText::new(lf!("{}  前（{}）", "{}  Earlier ({})", if self.show_past { ui::icon::CARET_DOWN } else { ui::icon::CARET_RIGHT }, self.dormant.len())).size(11.5).color(FAINT))
+                        .frame(false),
+                );
+                if r.clicked() {
+                    self.show_past = !self.show_past;
                 }
-                for (depth, node) in list.iter().skip(skip) {
-                    let c = &node.child;
-                    let id = Id::new(("child", &c.id));
-                    let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
-                    let on = viewing_child.as_deref() == Some(c.id.as_str());
-                    let inner = Frame::new()
-                        .fill(if on { CARD_SEL } else if hovered { CARD_HOVER } else { Color32::TRANSPARENT })
-                        .corner_radius(6)
-                        .inner_margin(Margin { left: 22 + (*depth as i8).min(6) * 12, right: 8, top: 3, bottom: 3 })
-                        .show(ui, |ui| {
+                if self.show_past {
+                    for (i, d) in self.dormant.iter().enumerate() {
+                        let id = Id::new(("dormant", i));
+                        let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
+                        let folder = d.cwd.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+                        let inner = Frame::new().fill(if hovered { CARD_HOVER } else { Color32::TRANSPARENT }).corner_radius(7).inner_margin(Margin::symmetric(8, 5)).show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            ui.spacing_mut().interact_size.y = 14.0;
                             ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 5.0;
-                                let arrow = if node.guessed { ui::icon::DOTS_THREE_OUTLINE_VERTICAL } else { ui::icon::ARROW_ELBOW_DOWN_RIGHT };
-                                ui.label(RichText::new(arrow).size(11.0).color(FAINT));
-                                let (g, col) = match c.status {
-                                    children::Status::Running => (ui::icon::CIRCLE_NOTCH, ACCENT),
-                                    children::Status::Done => (ui::icon::CHECK, OK),
-                                    children::Status::Stopped => (ui::icon::WARNING, WAITING),
-                                };
-                                ui.label(RichText::new(g).size(11.0).color(col));
-                                ui.label(RichText::new(&c.label).font(ui::bold(11.0)).color(MUTED));
-                                ui.add(Label::new(RichText::new(c.prompt.replace('\n', " ")).size(11.0).color(FAINT)).truncate());
+                                ui.add_space(20.0);
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if folder != d.name {
+                                        ui.label(RichText::new(&folder).size(11.0).color(FAINT));
+                                    }
+                                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                        ui.add(Label::new(RichText::new(&d.name).size(12.5).color(FAINT)).truncate());
+                                    });
+                                });
                             });
                         });
-                    let how = if node.guessed { l!("\n\n（呼び出し元は推測：同じフォルダで、上の段が動いている間に始まった）", "\n\n(Caller is a guess: it started in the same folder while the row above was running)") } else { "" };
-                    let r = ui.interact(inner.response.rect, id, Sense::click()).on_hover_text(format!("{}{how}", clip_text(&c.prompt, 300)));
-                    if r.clicked() {
-                        acts.push(Action::Child(c.id.clone()));
-                    }
-                    if c.status == children::Status::Running {
-                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+                        let how = if d.resumable() { l!("クリックで会話の続きから", "Click to continue the conversation") } else { l!("クリックで同じフォルダで開き直す", "Click to start again in the same folder") };
+                        let r = ui.interact(inner.response.rect, id, Sense::click()).on_hover_text(format!("{}  ·  {}\n{how}", d.agent, tilde(&d.cwd)));
+                        if r.clicked() {
+                            acts.push(Action::Resume(i));
+                        }
+                        r.context_menu(|ui| {
+                            if ui.button(format!("{}  {}", ui::icon::X, l!("忘れる", "Forget"))).clicked() {
+                                acts.push(Action::Forget(i));
+                                ui.close();
+                            }
+                        });
                     }
                 }
-                ui.add_space(2.0);
             }
         });
         acts
+    }
+
+    /// エージェントごとの利用枠の残り（5時間・1週間）。見出しを押すと読み直す
+    fn credits(&self, ui: &mut Ui, usages: &crate::usage::Usages) -> bool {
+        use crate::usage::{Usage, now_secs, until};
+        // 設定にあるエージェントのうち、枠が分かる種類（claude・codex）を優先度の順に1つずつ
+        let mut kinds: Vec<(resume::Kind, String)> = Vec::new();
+        for i in self.cfg.priority_order() {
+            let a = &self.cfg.agents[i];
+            let k = resume::kind(&a.cmd);
+            if k != resume::Kind::Other && !kinds.iter().any(|(x, _)| *x == k) {
+                kinds.push((k, a.name.clone()));
+            }
+        }
+        if kinds.is_empty() || !self.cfg.track_usage {
+            return false;
+        }
+        let now = now_secs();
+        ui.spacing_mut().interact_size.y = 14.0;
+        ui.spacing_mut().item_spacing.y = 3.0;
+        let head = ui.add(egui::Button::new(RichText::new(l!("残りの枠", "Usage left")).size(11.0).color(FAINT)).frame(false)).on_hover_text(l!("押すと読み直します", "Click to refresh"));
+        ui.add_space(2.0);
+        for (n, (k, name)) in kinds.into_iter().enumerate() {
+            if n > 0 {
+                ui.add_space(4.0);
+            }
+            let u = usages.get(&k);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&name).font(ui::bold(12.0)).color(MUTED));
+                if u.is_none_or(|u| u.five_hour.is_none() && u.seven_day.is_none()) {
+                    let why = match k {
+                        resume::Kind::Claude => l!("一度話すと分かります", "Known after you talk to it once"),
+                        _ => l!("まだ分かりません", "Not known yet"),
+                    };
+                    ui.label(RichText::new(why).size(11.0).color(FAINT));
+                }
+            });
+            let Some(u) = u else { continue };
+            for (label, w) in [(l!("5時間", "5 hours"), Usage::live(u.five_hour, now)), (l!("1週間", "1 week"), Usage::live(u.seven_day, now))] {
+                let Some(w) = w else { continue };
+                let left = w.left();
+                let col = if left <= 10.0 { BAD } else if left <= 30.0 { WAITING } else { OK };
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.add_sized(vec2(44.0, 14.0), Label::new(RichText::new(label).size(11.0).color(FAINT)));
+                    let (rect, _) = ui.allocate_exact_size(vec2(70.0, 6.0), Sense::hover());
+                    ui.painter().rect_filled(rect, 3.0, CARD_SEL);
+                    let mut fill = rect;
+                    fill.set_width(rect.width() * (left / 100.0) as f32);
+                    ui.painter().rect_filled(fill, 3.0, col);
+                    ui.label(RichText::new(format!("{left:.0}%")).size(11.0).color(if left <= 30.0 { col } else { MUTED }));
+                    if w.used > 0.0 {
+                        ui.label(RichText::new(lf!("{}に戻る", "resets {}", until(w.resets_at, now))).size(10.5).color(FAINT));
+                    }
+                });
+            }
+        }
+        head.clicked()
+    }
+
+    /// セッションでできること（一覧の右クリックと、上の「…」で同じものを出す）
+    fn session_menu(&self, ui: &mut Ui, i: usize, acts: &mut Vec<Action>) {
+        let Some(s) = self.sessions.get(i) else { return };
+        let item = |ui: &mut Ui, g: &str, t: &str| ui.button(format!("{g}  {t}")).clicked();
+        let mut push = |ui: &mut Ui, a: Action| {
+            acts.push(a);
+            ui.close();
+        };
+        if item(ui, ui::icon::PENCIL_SIMPLE, l!("名前を変える", "Rename")) {
+            push(ui, Action::Rename(i));
+        }
+        if item(ui, ui::icon::FOLDER_SIMPLE, l!("ファイル  ⌘E", "Files  ⌘E")) {
+            push(ui, Action::Files(i));
+        }
+        if item(ui, ui::icon::MAGNIFYING_GLASS, l!("検索  ⌘⇧F", "Search  ⌘⇧F")) {
+            push(ui, Action::Search(i));
+        }
+        if item(ui, ui::icon::GIT_DIFF, l!("差分  ⌘D", "Diff  ⌘D")) {
+            push(ui, Action::Diff(i));
+        }
+        if item(ui, ui::icon::TREE_STRUCTURE, l!("エージェントマップ  ⌘G", "Agent map  ⌘G")) {
+            push(ui, Action::Map);
+        }
+        if item(ui, ui::icon::CODE, &lf!("{} で開く", "Open in {}", self.cfg.editor_app)) {
+            push(ui, Action::Editor(i));
+        }
+        if item(ui, ui::icon::FOLDER_OPEN, l!("Finder で開く", "Show in Finder")) {
+            push(ui, Action::Finder(i));
+        }
+        if matches!(resume::kind(&s.base_cmd), resume::Kind::Claude | resume::Kind::Codex) && item(ui, ui::icon::ARROW_BEND_UP_RIGHT, l!("別のエージェントで続ける", "Continue with another agent")) {
+            push(ui, Action::Handoff(i));
+        }
+        ui.separator();
+        let label = if s.exit.is_some() { l!("一覧から外す", "Remove from list") } else { l!("止める…  ⌘W", "Stop…  ⌘W") };
+        if ui.button(RichText::new(format!("{}  {label}", ui::icon::STOP)).color(BAD)).clicked() {
+            push(ui, if s.exit.is_some() { Action::Remove(i) } else { Action::Kill(i) });
+        }
     }
 
     /// 上の帯: タブ（エージェント＋ファイル）と、右側の操作
@@ -1085,7 +1246,6 @@ impl PaibotAgentsApp {
         let mut tab_act = None;
         let i = self.sel;
         let cwd = self.sessions[i].cwd.clone();
-        let w = self.ws.entry(cwd.clone()).or_insert_with(|| Workspace::for_session(&self.sessions[i]));
         let s = &self.sessions[i];
         let branch = self.git_info.lock().unwrap().get(&s.cwd).and_then(|g| g.branch.clone()).or_else(|| s.branch.clone());
         let bar = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), 38.0));
@@ -1096,35 +1256,22 @@ impl PaibotAgentsApp {
         ui.advance_cursor_after_rect(bar);
         let ui = &mut bar_ui;
 
-        // 右側の操作
-        if s.exit.is_some() {
-            if ui::icon_button(ui, ui::icon::X, l!("一覧から外す", "Remove from list"), false).clicked() {
-                acts.push(Action::Remove(i));
-            }
-        } else if ui::icon_button_colored(ui, ui::icon::STOP, l!("止める  ⌘W", "Stop  ⌘W"), false, Some(BAD)).clicked() {
-            acts.push(Action::Kill(i));
-        }
-        if ui::icon_button(ui, ui::icon::CODE, &lf!("{} で開く", "Open in {}", self.cfg.editor_app), false).clicked() {
-            acts.push(Action::Editor(i));
+        // 右側: 使っているエージェント（小さく）と、それ以外の操作をまとめた「…」
+        let menu = ui.add(egui::Button::new(RichText::new(ui::icon::DOTS_THREE).size(17.0).color(MUTED)).frame(false)).on_hover_text(l!("ほかの操作", "More"));
+        egui::Popup::menu(&menu).show(|ui| self.session_menu(ui, i, &mut acts));
+        let s = &self.sessions[i];
+        let usages = self.usage.get();
+        let mut who = s.agent.clone();
+        if let Some(u) = usages.get(&resume::kind(&s.base_cmd)).map(|u| u.label(crate::usage::now_secs())).filter(|l| !l.is_empty()) {
+            who.push_str(&format!("  {u}"));
         }
         ui.add_space(4.0);
-        ui.painter().vline(ui.cursor().right() - 2.0, bar.y_range().shrink(11.0), Stroke::new(1.0, BORDER));
-        ui.add_space(6.0);
-        if ui::icon_button(ui, ui::icon::TREE_STRUCTURE, l!("エージェントマップ  ⌘G", "Agent map  ⌘G"), matches!(self.side, Some(Side::Map) | Some(Side::Child))).clicked() {
-            self.side = if self.side == Some(Side::Map) { None } else { Some(Side::Map) };
-        }
-        if ui::icon_button(ui, ui::icon::GIT_DIFF, l!("差分  ⌘D", "Diff  ⌘D"), self.side == Some(Side::Diff)).clicked() {
-            acts.push(Action::Diff(i));
-        }
-        if ui::icon_button(ui, ui::icon::MAGNIFYING_GLASS, l!("検索  ⌘⇧F", "Search  ⌘⇧F"), self.side == Some(Side::Search)).clicked() {
-            acts.push(Action::Search(i));
-        }
-        if ui::icon_button(ui, ui::icon::FOLDER_SIMPLE, l!("ファイル  ⌘E", "Files  ⌘E"), self.side == Some(Side::Files)).clicked() {
-            acts.push(Action::Files(i));
-        }
+        ui.label(RichText::new(who).size(11.5).color(FAINT));
         ui.add_space(8.0);
 
         // 左側のタブ
+        let w = self.ws.entry(cwd.clone()).or_insert_with(|| Workspace::for_session(&self.sessions[i]));
+        let s = &self.sessions[i];
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
             ScrollArea::horizontal().id_salt("tabs").scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
@@ -1204,6 +1351,7 @@ impl PaibotAgentsApp {
                 let color = match resume::kind(&s.base_cmd) {
                     resume::Kind::Claude => map::CLAUDE,
                     resume::Kind::Codex => map::CODEX,
+                    resume::Kind::Agy => map::AGY,
                     resume::Kind::Other => map::OTHER,
                 };
                 let start = s.started_at;
@@ -1369,7 +1517,8 @@ impl PaibotAgentsApp {
 
     fn dialogs(&mut self, ctx: &egui::Context) {
         if let Some(mut p) = self.picker.take() {
-            let shown = p.show(ctx, &self.cfg);
+            let usages = self.usage.get();
+            let shown = p.show(ctx, &self.cfg, &usages);
             // 開いたワークスペースは設定に覚えて、次から一覧に出す
             if let Some(f) = p.opened_workspace.take() {
                 let t = tilde(&f);
@@ -1497,6 +1646,8 @@ impl PaibotAgentsApp {
                 if let Some(s) = self.sessions.get_mut(i) {
                     if !name.trim().is_empty() {
                         s.name = name.trim().to_string();
+                        self.renamed.insert(s.id);
+                        s.sync_meta();
                     }
                 }
                 keep = false;
@@ -1519,8 +1670,7 @@ impl PaibotAgentsApp {
                 ),
                 Confirm::Quit => {
                     let dirty = self.dirty_docs();
-                    let extra = if dirty > 0 { lf!("保存していないファイルが {dirty} 個あります（保存されません）。", "{dirty} unsaved files will not be saved. ") } else { String::new() };
-                    (l!("終わる", "Quit").to_string(), lf!("動いているセッションが {} 個あります。{extra}全部止めて終わりますか？\n\n次に開いたとき、サイドバーの「前回のセッション」から再開できます（claude と codex は会話の続きから）。", "{} sessions are running. {extra}Stop them all and quit?\n\nNext time, you can resume them from \"Last time\" in the sidebar (claude and codex continue the conversation).", self.alive()))
+                    (l!("終わる", "Quit").to_string(), lf!("保存していないファイルが {dirty} 個あります。保存せずに終わりますか？\n\nセッションは裏で動き続けます。次に開いたとき、そのまま続きが見られます。", "{dirty} files have unsaved changes. Quit without saving?\n\nSessions keep running in the background; you'll see them again next time."))
                 }
                 Confirm::CloseDoc(cwd, i) => (
                     l!("閉じる", "Close").to_string(),
@@ -1585,7 +1735,7 @@ impl eframe::App for PaibotAgentsApp {
         if ctx.input(|i| i.viewport().close_requested()) {
             self.persist();
         }
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && (self.alive() > 0 || self.dirty_docs() > 0) {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && self.dirty_docs() > 0 {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.confirm = Some(Confirm::Quit);
         }
