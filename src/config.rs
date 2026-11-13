@@ -55,7 +55,7 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct BotDef {
     pub name: String,
-    /// claude / codex / agy / echo（echo は試し用。頼まれた文をそのまま返す）
+    /// claude / codex / echo（echo は試し用。頼まれた文をそのまま返す）
     pub agent: String,
     /// この Bot が動くフォルダ
     pub folder: String,

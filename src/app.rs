@@ -1151,7 +1151,7 @@ impl PaibotAgentsApp {
         for i in self.cfg.priority_order() {
             let a = &self.cfg.agents[i];
             let k = resume::kind(&a.cmd);
-            if k != resume::Kind::Other && !kinds.iter().any(|(x, _)| *x == k) {
+            if !matches!(k, resume::Kind::Other | resume::Kind::Agy) && !kinds.iter().any(|(x, _)| *x == k) {
                 kinds.push((k, a.name.clone()));
             }
         }

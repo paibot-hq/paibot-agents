@@ -137,8 +137,8 @@ pub fn snapshot(agents: &[Agent]) -> Usages {
         let u = match k {
             Kind::Claude => read_claude(),
             Kind::Codex => codex_app_server(&a.cmd).or_else(codex_from_logs),
-            Kind::Agy => agy_usage(&a.cmd),
-            Kind::Other => None,
+            // agy は外から `agy -p` で呼ぶと規約に触れるおそれがあるので読まない
+            Kind::Agy | Kind::Other => None,
         };
         if let Some(u) = u {
             out.insert(k, u);
@@ -215,67 +215,6 @@ fn codex_app_server(cmd: &str) -> Option<Usage> {
     let _ = child.kill();
     let _ = child.wait();
     got
-}
-
-/// agy の枠: `agy -p /usage --output-format json`（メッセージは送らないので枠は使わない）。
-/// agy の枠はモデルのグループごとにあるので、ふだん使う Gemini のグループを agy の枠とする
-fn agy_usage(cmd: &str) -> Option<Usage> {
-    let bin = cmd.split_whitespace().next()?;
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let mut child = Command::new(shell)
-        .args(["-l", "-i", "-c", &format!("{bin} -p /usage --output-format json")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .current_dir(std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/".into()))
-        .spawn()
-        .ok()?;
-    let mut out = child.stdout.take()?;
-    let (tx, rx) = mpsc::channel::<String>();
-    thread::spawn(move || {
-        let mut s = String::new();
-        let _ = out.read_to_string(&mut s);
-        let _ = tx.send(s);
-    });
-    let text = rx.recv_timeout(Duration::from_secs(25)).ok();
-    let _ = child.kill();
-    let _ = child.wait();
-    // .zshrc が何か出しても、JSON の行だけ読む
-    text?.lines().filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).find_map(|v| agy_from_json(&v))
-}
-
-pub fn agy_from_json(v: &Value) -> Option<Usage> {
-    let groups = v.pointer("/command/data/groups")?.as_array()?;
-    let g = groups.iter().find(|g| g.get("name").and_then(Value::as_str).is_some_and(|n| n.starts_with("Gemini Models"))).or_else(|| groups.first())?;
-    let mut u = Usage { at: now_secs(), ..Default::default() };
-    for b in g.get("buckets")?.as_array()? {
-        let left = b.get("remaining_fraction").and_then(Value::as_f64).unwrap_or(1.0);
-        let Some(resets_at) = b.get("reset_time").and_then(Value::as_str).and_then(parse_utc) else { continue };
-        let w = Window { used: ((1.0 - left) * 100.0).clamp(0.0, 100.0), resets_at };
-        match b.get("window").and_then(Value::as_str) {
-            Some("5h") => u.five_hour = Some(w),
-            Some("weekly") => u.seven_day = Some(w),
-            _ => {}
-        }
-    }
-    (u.five_hour.is_some() || u.seven_day.is_some()).then_some(u)
-}
-
-/// 「2026-11-14T04:17:10Z」を UNIX 秒に
-fn parse_utc(s: &str) -> Option<u64> {
-    let (date, time) = s.trim_end_matches('Z').split_once('T')?;
-    let mut d = date.split('-').map(|x| x.parse::<i64>());
-    let (y, m, day) = (d.next()?.ok()?, d.next()?.ok()?, d.next()?.ok()?);
-    let mut t = time.split(':').map(|x| x.split('.').next().unwrap_or("0").parse::<i64>());
-    let (hh, mm, ss) = (t.next()?.ok()?, t.next()?.ok()?, t.next().and_then(|x| x.ok()).unwrap_or(0));
-    // 日付から日数（1970-01-01 から）
-    let y2 = if m <= 2 { y - 1 } else { y };
-    let era = y2.div_euclid(400);
-    let yoe = y2 - era * 400;
-    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146097 + doe - 719468;
-    u64::try_from(days * 86400 + hh * 3600 + mm * 60 + ss).ok()
 }
 
 /// codex の一番新しい会話の記録から、最後に書かれた利用枠を読む
@@ -454,21 +393,6 @@ mod tests {
 
     fn used(p: f64, in_secs: u64) -> Option<Window> {
         Some(Window { used: p, resets_at: now_secs() + in_secs })
-    }
-
-    #[test]
-    fn reads_agy_usage() {
-        assert_eq!(parse_utc("1970-01-02T00:00:01Z"), Some(86401));
-        assert_eq!(parse_utc("2026-11-14T04:17:10Z"), Some(1794629830));
-        let v = json!({"command": {"data": {"groups": [
-            {"name": "Gemini Models", "buckets": [
-                {"window": "weekly", "remaining_fraction": 0.75, "reset_time": "2026-11-14T04:17:10Z"},
-                {"window": "5h", "remaining_fraction": 1, "reset_time": "2026-11-12T14:39:48Z"}]},
-            {"name": "Claude and GPT models", "buckets": [{"window": "5h", "remaining_fraction": 0.1, "reset_time": "2026-11-12T14:39:48Z"}]}
-        ]}}});
-        let u = agy_from_json(&v).unwrap();
-        assert_eq!(u.seven_day.unwrap().used, 25.0);
-        assert_eq!(u.five_hour.unwrap().used, 0.0);
     }
 
     #[test]
